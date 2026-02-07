@@ -1,0 +1,7 @@
+.env
+.env
+.DS_Store
+__pycache__/
+*.pyc
+nba_api_executed.ipynb
+.ipynb_checkpoints/
