@@ -35,7 +35,7 @@
    - Run data quality checks (row count, null business keys, duplicate business keys).
    - `MERGE` staging into partitioned/clustered raw table: `raw_game_logs`.
 5. Run BigQuery analytics (window functions, seasonal averages, trends, reusable view).
-6. Generate AI analysis article from query outputs.
+6. Generate AI analysis to write a simple article from query outputs
 
 ## Data Quality Gates
 The notebook stops execution if staging data has:
