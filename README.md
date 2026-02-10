@@ -1,4 +1,8 @@
-# NBA Alert Pipeline
+# From NBA Stats to Story: Trending Player Insights with GCP and Claude API
+
+> **Note:** This project is a practice build for learning GCP data workflows and Claude API integration.  
+
+> It is intended for educational/demo use, not production.
 
 
 ## Setup
