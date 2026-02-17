@@ -1,5 +1,7 @@
 # From NBA Stats to Story: Trending Player Insights with GCP and Claude API
 
+A data pipeline that pulls NBA player game logs, stores them in BigQuery with partitioning and clustering, runs trending-player analytics with window functions, and uses the Claude API to generate written insights. Built as a GCP + AI integration demo.
+
 > **Note:** This project is a practice build for learning GCP data workflows and Claude API integration.  
 
 > It is intended for educational/demo use, not production.
