@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ page_title }}</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #17212b;
+        --muted: #5c6874;
+        --surface: #fffaf2;
+        --panel: #ffffff;
+        --accent: #d95f02;
+        --accent-soft: #ffe4cf;
+        --line: #e7d8c7;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, #fff1dc 0, transparent 28rem),
+          linear-gradient(180deg, #fff8ee 0%, #f8f2ea 100%);
+      }
+      main {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 2rem 1.25rem 3rem;
+      }
+      a { color: inherit; }
+      .nav {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1.5rem;
+        font-size: 0.95rem;
+        color: var(--muted);
+      }
+      .hero {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 1.5rem;
+        box-shadow: 0 10px 30px rgba(23, 33, 43, 0.06);
+      }
+      .eyebrow {
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        font-size: 0.75rem;
+        color: var(--accent);
+      }
+      h1, h2, h3 { margin: 0 0 0.75rem; }
+      .subhead { color: var(--muted); max-width: 48rem; }
+      .status {
+        display: inline-block;
+        margin-top: 1rem;
+        padding: 0.45rem 0.75rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--ink);
+        font-size: 0.9rem;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 1rem;
+        margin-top: 1.5rem;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        padding: 1.25rem;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.95rem;
+      }
+      th, td {
+        text-align: left;
+        padding: 0.55rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+      th {
+        color: var(--muted);
+        font-size: 0.8rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .analysis-body {
+        white-space: pre-line;
+        line-height: 1.6;
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+      @media (max-width: 720px) {
+        main { padding: 1.25rem 1rem 2rem; }
+        .hero, .card { border-radius: 16px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <nav class="nav">
+        <a href="/">Home</a>
+        <a href="/analysis">Analysis</a>
+        <span>Season {{ season }}</span>
+      </nav>
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

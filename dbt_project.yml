@@ -1,0 +1,13 @@
+name: nba_warehouse
+version: 1.0.0
+config-version: 2
+
+profile: nba_warehouse
+
+model-paths: ["dbt/models"]
+test-paths: ["dbt/tests"]
+
+models:
+  nba_warehouse:
+    +materialized: view
+
