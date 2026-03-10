@@ -1,0 +1,113 @@
+{{ config(
+    materialized='view',
+    schema=env_var('BQ_DATASET_GOLD', env_var('BQ_DATASET', 'nba_gold'))
+) }}
+
+with numbered as (
+    select
+        season,
+        player_id,
+        player_name,
+        pts,
+        reb,
+        ast,
+        stl,
+        blk,
+        row_number() over (
+            partition by player_id
+            order by game_date desc
+        ) as game_num
+    from {{ ref('fct_player_game_stats') }}
+),
+base as (
+    select * from numbered where game_num <= 10
+),
+pts_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'PTS' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then pts end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then pts end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+reb_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'REB' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then reb end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then reb end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+ast_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'AST' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then ast end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then ast end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+stl_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'STL' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then stl end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then stl end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+blk_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'BLK' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then blk end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then blk end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+unioned as (
+    select * from pts_trend
+    union all
+    select * from reb_trend
+    union all
+    select * from ast_trend
+    union all
+    select * from stl_trend
+    union all
+    select * from blk_trend
+)
+select
+    season,
+    player_id,
+    player_name,
+    stat,
+    recent_games,
+    prior_games,
+    recent_avg,
+    prior_avg,
+    round(recent_avg - prior_avg, 1) as delta,
+    round(safe_divide(recent_avg - prior_avg, nullif(prior_avg, 0)) * 100, 1) as pct_change
+from unioned
+where recent_games >= 3 and prior_games >= 3

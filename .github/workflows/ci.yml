@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      AIRFLOW_HOME: ${{ github.workspace }}/airflow_home
+      BQ_PROJECT: local-project
+      GCP_PROJECT_ID: local-project
+      BQ_DATASET: nba_data
+      BQ_DATASET_BRONZE: nba_bronze
+      BQ_DATASET_SILVER: nba_silver
+      BQ_DATASET_GOLD: nba_gold
+      BQ_METADATA_DATASET: nba_metadata
+      BQ_LOCATION: US
+      DBT_TARGET: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify repo hygiene
+        run: |
+          tracked_env_files="$(git ls-files | grep -E '(^|/)\.env([^/]*)?$' || true)"
+          if [ -n "$tracked_env_files" ]; then
+            echo "Do not commit environment files:"
+            echo "$tracked_env_files"
+            exit 1
+          fi
+
+          if git grep -nE 'sk-ant-|ANTHROPIC_API_KEY=' -- . ':(exclude).github/workflows/ci.yml'; then
+            echo "Found an Anthropic secret pattern in tracked files."
+            exit 1
+          fi
+
+      - name: Run Python tests
+        run: pytest -q
+
+      - name: Parse dbt project
+        run: dbt parse --project-dir . --profiles-dir dbt/profiles --target dev
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Validate Terraform
+        run: |
+          terraform -chdir=infra/terraform init -backend=false
+          terraform -chdir=infra/terraform validate

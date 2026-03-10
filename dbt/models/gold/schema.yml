@@ -1,0 +1,124 @@
+version: 2
+
+sources:
+  - name: gold_runtime
+    database: "{{ env_var('BQ_PROJECT', env_var('GCP_PROJECT_ID', 'local-project')) }}"
+    schema: "{{ env_var('BQ_DATASET_GOLD', env_var('BQ_DATASET', 'nba_gold')) }}"
+    tables:
+      - name: analysis_snapshots
+        columns:
+          - name: snapshot_id
+            tests: [not_null]
+          - name: snapshot_date
+            tests: [not_null]
+          - name: season
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['2025-26']
+          - name: source_run_id
+            tests: [not_null]
+
+models:
+  - name: fct_player_game_stats
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: team_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+      - name: opponent_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: game_date
+        tests: [not_null]
+      - name: matchup
+        tests: [not_null]
+      - name: wl
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['W', 'L']
+  - name: dim_player
+    columns:
+      - name: player_id
+        tests: [not_null, unique]
+      - name: latest_season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+  - name: dim_team
+    columns:
+      - name: team_abbr
+        tests: [not_null, unique]
+      - name: latest_season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+  - name: player_trends
+    columns:
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: stat
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['PTS', 'REB', 'AST', 'STL', 'BLK']
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+  - name: daily_leaderboard
+    columns:
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: game_date
+        tests: [not_null]
+      - name: pts_leader
+        tests: [not_null]
+  - name: analysis_snapshot_latest
+    columns:
+      - name: snapshot_id
+        tests: [not_null]
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']

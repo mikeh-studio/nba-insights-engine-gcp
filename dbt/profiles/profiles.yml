@@ -1,0 +1,12 @@
+nba_warehouse:
+  target: "{{ env_var('DBT_TARGET', 'dev') }}"
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('BQ_PROJECT', env_var('GCP_PROJECT_ID', 'local-project')) }}"
+      dataset: "{{ env_var('BQ_DATASET_GOLD', env_var('BQ_DATASET', 'nba_gold')) }}"
+      location: "{{ env_var('BQ_LOCATION', 'US') }}"
+      threads: 4
+      timeout_seconds: 300
+      priority: interactive

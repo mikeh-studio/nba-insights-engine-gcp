@@ -1,0 +1,34 @@
+version: 2
+
+models:
+  - name: stg_game_logs_clean
+    columns:
+      - name: player_id
+        tests: [not_null]
+      - name: game_date
+        tests: [not_null]
+      - name: matchup
+        tests: [not_null]
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: wl
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['W', 'L']
+  - name: int_player_game_enriched
+    columns:
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: team_abbr
+        tests: [not_null]
+      - name: opponent_abbr
+        tests: [not_null]
