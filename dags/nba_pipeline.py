@@ -15,13 +15,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 import pandas as pd
 from google.cloud import bigquery, storage
 from nba_api.stats.endpoints import playergamelog
+from nba_api.stats.endpoints import scheduleleaguev2
 from nba_api.stats.static import players
 
 logger = logging.getLogger("nba_pipeline")
 
 SOURCE_SYSTEM = "nba_api"
 SUPPORTED_SEASON = "2025-26"
-ALLOWED_WL_VALUES = {"W", "L"}
 SUPPORTED_SEASON_START = date(2025, 7, 1)
 SUPPORTED_SEASON_END = date(2026, 6, 30)
 
@@ -279,12 +279,25 @@ def get_player_game_log(
         "MATCHUP",
         "WL",
         "MIN",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG3M",
+        "FG3A",
+        "FG3_PCT",
+        "FTM",
+        "FTA",
+        "FT_PCT",
+        "OREB",
+        "DREB",
         "PTS",
         "REB",
         "AST",
         "STL",
         "BLK",
         "TOV",
+        "PF",
+        "PLUS_MINUS",
     ]
 
     for attempt in range(1, retries + 1):
@@ -300,7 +313,28 @@ def get_player_game_log(
             out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], errors="coerce")
             out = out.dropna(subset=["GAME_DATE"])
 
-            numeric_cols = ["MIN", "PTS", "REB", "AST", "STL", "BLK", "TOV"]
+            numeric_cols = [
+                "MIN",
+                "FGM",
+                "FGA",
+                "FG_PCT",
+                "FG3M",
+                "FG3A",
+                "FG3_PCT",
+                "FTM",
+                "FTA",
+                "FT_PCT",
+                "OREB",
+                "DREB",
+                "PTS",
+                "REB",
+                "AST",
+                "STL",
+                "BLK",
+                "TOV",
+                "PF",
+                "PLUS_MINUS",
+            ]
             for col in numeric_cols:
                 out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
 
@@ -363,6 +397,15 @@ def get_all_player_game_logs(
         "GAME_DATE",
         "PLAYER_ID",
         "PLAYER_NAME",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG3M",
+        "FG3A",
+        "FG3_PCT",
+        "FTM",
+        "FTA",
+        "FT_PCT",
         "PTS",
         "REB",
         "AST",
@@ -408,12 +451,25 @@ def get_game_logs_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("MATCHUP", "STRING"),
         bigquery.SchemaField("WL", "STRING"),
         bigquery.SchemaField("MIN", "FLOAT"),
+        bigquery.SchemaField("FGM", "FLOAT"),
+        bigquery.SchemaField("FGA", "FLOAT"),
+        bigquery.SchemaField("FG_PCT", "FLOAT"),
+        bigquery.SchemaField("FG3M", "FLOAT"),
+        bigquery.SchemaField("FG3A", "FLOAT"),
+        bigquery.SchemaField("FG3_PCT", "FLOAT"),
+        bigquery.SchemaField("FTM", "FLOAT"),
+        bigquery.SchemaField("FTA", "FLOAT"),
+        bigquery.SchemaField("FT_PCT", "FLOAT"),
+        bigquery.SchemaField("OREB", "FLOAT"),
+        bigquery.SchemaField("DREB", "FLOAT"),
         bigquery.SchemaField("PTS", "INTEGER"),
         bigquery.SchemaField("REB", "INTEGER"),
         bigquery.SchemaField("AST", "INTEGER"),
         bigquery.SchemaField("STL", "INTEGER"),
         bigquery.SchemaField("BLK", "INTEGER"),
         bigquery.SchemaField("TOV", "INTEGER"),
+        bigquery.SchemaField("PF", "INTEGER"),
+        bigquery.SchemaField("PLUS_MINUS", "FLOAT"),
         bigquery.SchemaField("SEASON", "STRING"),
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
         bigquery.SchemaField("PLAYER_ID", "INTEGER"),
@@ -488,7 +544,14 @@ def run_data_quality_checks(
       (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
       (SELECT COUNT(*) FROM base WHERE season != @season OR season IS NULL) AS invalid_season_rows,
       (SELECT COUNT(*) FROM base WHERE game_date < @season_start OR game_date > @season_end) AS out_of_window_rows,
-      (SELECT COUNT(*) FROM base WHERE wl IS NOT NULL AND upper(wl) NOT IN ('W', 'L')) AS invalid_wl_rows
+      (SELECT COUNT(*) FROM base WHERE wl IS NOT NULL AND upper(wl) NOT IN ('W', 'L')) AS invalid_wl_rows,
+      (
+        SELECT COUNT(*)
+        FROM base
+        WHERE (fg_pct IS NOT NULL AND (fg_pct < 0 OR fg_pct > 1))
+           OR (ft_pct IS NOT NULL AND (ft_pct < 0 OR ft_pct > 1))
+           OR (fg3_pct IS NOT NULL AND (fg3_pct < 0 OR fg3_pct > 1))
+      ) AS invalid_pct_rows
     """
 
     job_config = bigquery.QueryJobConfig(
@@ -531,6 +594,10 @@ def run_data_quality_checks(
         raise ValueError(
             f"DQ failed: found {dq['invalid_wl_rows']} rows with invalid WL values"
         )
+    if dq["invalid_pct_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_pct_rows']} rows with invalid shooting percentages"
+        )
 
     return dq
 
@@ -545,12 +612,25 @@ def create_and_merge_raw_table(
       matchup STRING,
       wl STRING,
       min FLOAT64,
+      fgm FLOAT64,
+      fga FLOAT64,
+      fg_pct FLOAT64,
+      fg3m FLOAT64,
+      fg3a FLOAT64,
+      fg3_pct FLOAT64,
+      ftm FLOAT64,
+      fta FLOAT64,
+      ft_pct FLOAT64,
+      oreb FLOAT64,
+      dreb FLOAT64,
       pts INT64,
       reb INT64,
       ast INT64,
       stl INT64,
       blk INT64,
       tov INT64,
+      pf INT64,
+      plus_minus FLOAT64,
       season STRING,
       ingested_at_utc TIMESTAMP,
       player_id INT64,
@@ -568,12 +648,25 @@ def create_and_merge_raw_table(
         AND (
           COALESCE(t.wl, '') != COALESCE(s.wl, '')
           OR COALESCE(t.min, 0) != COALESCE(s.min, 0)
+          OR COALESCE(t.fgm, 0) != COALESCE(s.fgm, 0)
+          OR COALESCE(t.fga, 0) != COALESCE(s.fga, 0)
+          OR COALESCE(t.fg_pct, 0) != COALESCE(s.fg_pct, 0)
+          OR COALESCE(t.fg3m, 0) != COALESCE(s.fg3m, 0)
+          OR COALESCE(t.fg3a, 0) != COALESCE(s.fg3a, 0)
+          OR COALESCE(t.fg3_pct, 0) != COALESCE(s.fg3_pct, 0)
+          OR COALESCE(t.ftm, 0) != COALESCE(s.ftm, 0)
+          OR COALESCE(t.fta, 0) != COALESCE(s.fta, 0)
+          OR COALESCE(t.ft_pct, 0) != COALESCE(s.ft_pct, 0)
+          OR COALESCE(t.oreb, 0) != COALESCE(s.oreb, 0)
+          OR COALESCE(t.dreb, 0) != COALESCE(s.dreb, 0)
           OR COALESCE(t.pts, 0) != COALESCE(s.pts, 0)
           OR COALESCE(t.reb, 0) != COALESCE(s.reb, 0)
           OR COALESCE(t.ast, 0) != COALESCE(s.ast, 0)
           OR COALESCE(t.stl, 0) != COALESCE(s.stl, 0)
           OR COALESCE(t.blk, 0) != COALESCE(s.blk, 0)
           OR COALESCE(t.tov, 0) != COALESCE(s.tov, 0)
+          OR COALESCE(t.pf, 0) != COALESCE(s.pf, 0)
+          OR COALESCE(t.plus_minus, 0) != COALESCE(s.plus_minus, 0)
           OR COALESCE(t.season, '') != COALESCE(s.season, '')
           OR COALESCE(t.player_name, '') != COALESCE(s.player_name, '')
         )
@@ -594,32 +687,61 @@ def create_and_merge_raw_table(
     WHEN MATCHED AND (
       COALESCE(T.wl, '') != COALESCE(S.wl, '')
       OR COALESCE(T.min, 0) != COALESCE(S.min, 0)
+      OR COALESCE(T.fgm, 0) != COALESCE(S.fgm, 0)
+      OR COALESCE(T.fga, 0) != COALESCE(S.fga, 0)
+      OR COALESCE(T.fg_pct, 0) != COALESCE(S.fg_pct, 0)
+      OR COALESCE(T.fg3m, 0) != COALESCE(S.fg3m, 0)
+      OR COALESCE(T.fg3a, 0) != COALESCE(S.fg3a, 0)
+      OR COALESCE(T.fg3_pct, 0) != COALESCE(S.fg3_pct, 0)
+      OR COALESCE(T.ftm, 0) != COALESCE(S.ftm, 0)
+      OR COALESCE(T.fta, 0) != COALESCE(S.fta, 0)
+      OR COALESCE(T.ft_pct, 0) != COALESCE(S.ft_pct, 0)
+      OR COALESCE(T.oreb, 0) != COALESCE(S.oreb, 0)
+      OR COALESCE(T.dreb, 0) != COALESCE(S.dreb, 0)
       OR COALESCE(T.pts, 0) != COALESCE(S.pts, 0)
       OR COALESCE(T.reb, 0) != COALESCE(S.reb, 0)
       OR COALESCE(T.ast, 0) != COALESCE(S.ast, 0)
       OR COALESCE(T.stl, 0) != COALESCE(S.stl, 0)
       OR COALESCE(T.blk, 0) != COALESCE(S.blk, 0)
       OR COALESCE(T.tov, 0) != COALESCE(S.tov, 0)
+      OR COALESCE(T.pf, 0) != COALESCE(S.pf, 0)
+      OR COALESCE(T.plus_minus, 0) != COALESCE(S.plus_minus, 0)
       OR COALESCE(T.season, '') != COALESCE(S.season, '')
       OR COALESCE(T.player_name, '') != COALESCE(S.player_name, '')
     ) THEN
       UPDATE SET
         wl = S.wl,
         min = S.min,
+        fgm = S.fgm,
+        fga = S.fga,
+        fg_pct = S.fg_pct,
+        fg3m = S.fg3m,
+        fg3a = S.fg3a,
+        fg3_pct = S.fg3_pct,
+        ftm = S.ftm,
+        fta = S.fta,
+        ft_pct = S.ft_pct,
+        oreb = S.oreb,
+        dreb = S.dreb,
         pts = S.pts,
         reb = S.reb,
         ast = S.ast,
         stl = S.stl,
         blk = S.blk,
         tov = S.tov,
+        pf = S.pf,
+        plus_minus = S.plus_minus,
         season = S.season,
         ingested_at_utc = S.ingested_at_utc,
         player_name = S.player_name
     WHEN NOT MATCHED THEN
-      INSERT (game_date, matchup, wl, min, pts, reb, ast, stl, blk, tov,
+      INSERT (game_date, matchup, wl, min, fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
+              ftm, fta, ft_pct, oreb, dreb, pts, reb, ast, stl, blk, tov, pf, plus_minus,
               season, ingested_at_utc, player_id, player_name)
-      VALUES (S.game_date, S.matchup, S.wl, S.min, S.pts, S.reb, S.ast, S.stl,
-              S.blk, S.tov, S.season, S.ingested_at_utc, S.player_id, S.player_name)
+      VALUES (S.game_date, S.matchup, S.wl, S.min, S.fgm, S.fga, S.fg_pct, S.fg3m, S.fg3a,
+              S.fg3_pct, S.ftm, S.fta, S.ft_pct, S.oreb, S.dreb, S.pts, S.reb, S.ast, S.stl,
+              S.blk, S.tov, S.pf, S.plus_minus, S.season, S.ingested_at_utc, S.player_id,
+              S.player_name)
     """
 
     bq_client.query(create_ddl).result()
@@ -644,6 +766,252 @@ def create_and_merge_raw_table(
     }
     logger.info("MERGE completed: %s", result)
     return result
+
+
+def get_schedule_schema() -> List[bigquery.SchemaField]:
+    """Return the BigQuery schema for upcoming team schedule rows."""
+    return [
+        bigquery.SchemaField("SCHEDULE_DATE", "DATE"),
+        bigquery.SchemaField("GAME_ID", "STRING"),
+        bigquery.SchemaField("SEASON", "STRING"),
+        bigquery.SchemaField("TEAM_ABBR", "STRING"),
+        bigquery.SchemaField("OPPONENT_ABBR", "STRING"),
+        bigquery.SchemaField("HOME_AWAY", "STRING"),
+        bigquery.SchemaField("IS_BACK_TO_BACK", "BOOLEAN"),
+        bigquery.SchemaField("GAME_STATUS", "STRING"),
+        bigquery.SchemaField("SOURCE_UPDATED_AT_UTC", "TIMESTAMP"),
+        bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
+    ]
+
+
+def get_upcoming_schedule(
+    *,
+    season: str = SUPPORTED_SEASON,
+    horizon_days: int = 7,
+    today: Any = None,
+) -> pd.DataFrame:
+    """Fetch upcoming schedule rows from nba_api scheduleleaguev2."""
+    if season != SUPPORTED_SEASON:
+        raise ValueError(f"Unsupported production season: {season}")
+
+    base_day = coerce_to_date(today) or pd.Timestamp.now(tz="UTC").date()
+    end_day = base_day + timedelta(days=max(horizon_days, 1) - 1)
+    schedule = scheduleleaguev2.ScheduleLeagueV2(season=season)
+    frames = schedule.get_data_frames()
+    if not frames:
+        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+
+    raw = frames[0].copy()
+    if raw.empty:
+        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+
+    raw["gameDate"] = pd.to_datetime(raw["gameDate"], errors="coerce").dt.date
+    raw["gameDateTimeUTC"] = pd.to_datetime(
+        raw["gameDateTimeUTC"], errors="coerce", utc=True
+    )
+    raw = raw[(raw["gameDate"] >= base_day) & (raw["gameDate"] <= end_day)].copy()
+
+    if raw.empty:
+        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+
+    ingested_at = pd.Timestamp.now(tz="UTC")
+    team_rows: list[dict[str, Any]] = []
+    for row in raw.to_dict("records"):
+        game_date = row.get("gameDate")
+        game_id = str(row.get("gameId", "") or "")
+        source_updated_at = row.get("gameDateTimeUTC")
+        game_status = str(row.get("gameStatusText", "") or "")
+        season_value = season
+        home_team = str(row.get("homeTeam_teamTricode", "") or "").upper()
+        away_team = str(row.get("awayTeam_teamTricode", "") or "").upper()
+        if not game_id or not game_date or not home_team or not away_team:
+            continue
+        team_rows.extend(
+            [
+                {
+                    "SCHEDULE_DATE": game_date,
+                    "GAME_ID": game_id,
+                    "SEASON": season_value,
+                    "TEAM_ABBR": home_team,
+                    "OPPONENT_ABBR": away_team,
+                    "HOME_AWAY": "HOME",
+                    "IS_BACK_TO_BACK": False,
+                    "GAME_STATUS": game_status,
+                    "SOURCE_UPDATED_AT_UTC": source_updated_at,
+                    "INGESTED_AT_UTC": ingested_at,
+                },
+                {
+                    "SCHEDULE_DATE": game_date,
+                    "GAME_ID": game_id,
+                    "SEASON": season_value,
+                    "TEAM_ABBR": away_team,
+                    "OPPONENT_ABBR": home_team,
+                    "HOME_AWAY": "AWAY",
+                    "IS_BACK_TO_BACK": False,
+                    "GAME_STATUS": game_status,
+                    "SOURCE_UPDATED_AT_UTC": source_updated_at,
+                    "INGESTED_AT_UTC": ingested_at,
+                },
+            ]
+        )
+
+    df = pd.DataFrame(team_rows)
+    if df.empty:
+        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+    df = df.drop_duplicates(subset=["GAME_ID", "TEAM_ABBR"]).copy()
+    df["SCHEDULE_DATE"] = pd.to_datetime(df["SCHEDULE_DATE"], errors="coerce")
+    df = df.sort_values(["TEAM_ABBR", "SCHEDULE_DATE", "GAME_ID"]).reset_index(
+        drop=True
+    )
+    prev_dates = df.groupby("TEAM_ABBR")["SCHEDULE_DATE"].shift(1)
+    df["IS_BACK_TO_BACK"] = prev_dates.notna() & (
+        (df["SCHEDULE_DATE"] - prev_dates).dt.days == 1
+    )
+    df["SCHEDULE_DATE"] = df["SCHEDULE_DATE"].dt.date
+    return df.reset_index(drop=True)
+
+
+def run_schedule_quality_checks(
+    bq_client: bigquery.Client,
+    staging_table: str,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> dict:
+    """Run data quality checks on schedule staging table."""
+    dq_query = f"""
+    WITH base AS (
+      SELECT *
+      FROM `{staging_table}`
+    ),
+    dups AS (
+      SELECT COUNT(*) AS duplicate_keys
+      FROM (
+        SELECT game_id, team_abbr, COUNT(*) AS cnt
+        FROM base
+        GROUP BY game_id, team_abbr
+        HAVING COUNT(*) > 1
+      )
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total_rows,
+      (SELECT COUNT(*) FROM base WHERE schedule_date IS NULL OR game_id IS NULL OR team_abbr IS NULL) AS null_key_rows,
+      (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
+      (SELECT COUNT(*) FROM base WHERE season != @season OR season IS NULL) AS invalid_season_rows,
+      (SELECT COUNT(*) FROM base WHERE home_away IS NULL OR upper(home_away) NOT IN ('HOME', 'AWAY')) AS invalid_home_away_rows
+    """
+    dq = (
+        bq_client.query(
+            dq_query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("season", "STRING", season),
+                ]
+            ),
+        )
+        .to_dataframe()
+        .iloc[0]
+        .to_dict()
+    )
+    if dq["null_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['null_key_rows']} schedule rows with null keys"
+        )
+    if dq["duplicate_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['duplicate_key_rows']} duplicate schedule rows"
+        )
+    if dq["invalid_season_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_season_rows']} schedule rows outside season {season}"
+        )
+    if dq["invalid_home_away_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_home_away_rows']} schedule rows with invalid home/away values"
+        )
+    return dq
+
+
+def create_and_merge_schedule_table(
+    bq_client: bigquery.Client, staging_table: str, raw_table: str
+) -> Dict[str, int]:
+    """Create schedule raw table if needed and merge staging data into it."""
+    create_ddl = f"""
+    CREATE TABLE IF NOT EXISTS `{raw_table}` (
+      schedule_date DATE,
+      game_id STRING,
+      season STRING,
+      team_abbr STRING,
+      opponent_abbr STRING,
+      home_away STRING,
+      is_back_to_back BOOL,
+      game_status STRING,
+      source_updated_at_utc TIMESTAMP,
+      ingested_at_utc TIMESTAMP
+    )
+    PARTITION BY schedule_date
+    CLUSTER BY team_abbr, game_id
+    """
+    stats_sql = f"""
+    SELECT
+      COUNTIF(t.game_id IS NULL) AS inserted,
+      COUNTIF(
+        t.game_id IS NOT NULL
+        AND (
+          COALESCE(t.opponent_abbr, '') != COALESCE(s.opponent_abbr, '')
+          OR COALESCE(t.home_away, '') != COALESCE(s.home_away, '')
+          OR COALESCE(t.is_back_to_back, FALSE) != COALESCE(s.is_back_to_back, FALSE)
+          OR COALESCE(t.game_status, '') != COALESCE(s.game_status, '')
+          OR COALESCE(t.source_updated_at_utc, TIMESTAMP('1970-01-01')) != COALESCE(s.source_updated_at_utc, TIMESTAMP('1970-01-01'))
+        )
+      ) AS updated
+    FROM `{staging_table}` s
+    LEFT JOIN `{raw_table}` t
+      ON t.game_id = s.game_id
+     AND t.team_abbr = s.team_abbr
+    """
+    merge_sql = f"""
+    MERGE `{raw_table}` T
+    USING `{staging_table}` S
+    ON T.game_id = S.game_id
+    AND T.team_abbr = S.team_abbr
+    WHEN MATCHED AND (
+      COALESCE(T.opponent_abbr, '') != COALESCE(S.opponent_abbr, '')
+      OR COALESCE(T.home_away, '') != COALESCE(S.home_away, '')
+      OR COALESCE(T.is_back_to_back, FALSE) != COALESCE(S.is_back_to_back, FALSE)
+      OR COALESCE(T.game_status, '') != COALESCE(S.game_status, '')
+      OR COALESCE(T.source_updated_at_utc, TIMESTAMP('1970-01-01')) != COALESCE(S.source_updated_at_utc, TIMESTAMP('1970-01-01'))
+    ) THEN UPDATE SET
+      schedule_date = S.schedule_date,
+      season = S.season,
+      opponent_abbr = S.opponent_abbr,
+      home_away = S.home_away,
+      is_back_to_back = S.is_back_to_back,
+      game_status = S.game_status,
+      source_updated_at_utc = S.source_updated_at_utc,
+      ingested_at_utc = S.ingested_at_utc
+    WHEN NOT MATCHED THEN
+      INSERT (schedule_date, game_id, season, team_abbr, opponent_abbr, home_away, is_back_to_back, game_status, source_updated_at_utc, ingested_at_utc)
+      VALUES (S.schedule_date, S.game_id, S.season, S.team_abbr, S.opponent_abbr, S.home_away, S.is_back_to_back, S.game_status, S.source_updated_at_utc, S.ingested_at_utc)
+    """
+    bq_client.query(create_ddl).result()
+    pre_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    stats = bq_client.query(stats_sql).to_dataframe().iloc[0].to_dict()
+    bq_client.query(merge_sql).result()
+    post_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    return {
+        "pre_count": int(pre_count),
+        "post_count": int(post_count),
+        "inserted": int(stats["inserted"]),
+        "updated": int(stats["updated"]),
+    }
 
 
 def create_analysis_snapshot_table(
@@ -677,6 +1045,8 @@ def build_analysis_snapshot_record(
     season: str,
     daily_leaders: pd.DataFrame,
     trends: pd.DataFrame,
+    recommendations: Optional[pd.DataFrame] = None,
+    rankings: Optional[pd.DataFrame] = None,
     source_run_id: str,
     created_at_utc: Any = None,
     snapshot_date: Any = None,
@@ -700,11 +1070,19 @@ def build_analysis_snapshot_record(
     latest_row = leaders.iloc[0]
     snapshot_day = coerce_to_date(snapshot_date) or created_at.date()
     latest_game_date = latest_row["game_date"].date()
+    recommendations = (
+        recommendations.copy() if recommendations is not None else pd.DataFrame()
+    )
+    rankings = rankings.copy() if rankings is not None else pd.DataFrame()
 
     trend_player = ""
     trend_stat = ""
     trend_delta = 0.0
     trend_sentence = "No player trend qualified for the latest snapshot window."
+    recommendation_sentence = (
+        "No fantasy recommendation qualified for the latest snapshot window."
+    )
+    ranking_sentence = "No fantasy ranking summary is available yet."
 
     if not trends.empty:
         trend_working = trends.copy()
@@ -728,15 +1106,67 @@ def build_analysis_snapshot_record(
                 f"{prior_avg:.1f} to {recent_avg:.1f} per game ({trend_delta:+.1f})."
             )
 
+    top_recommendation = None
+    if not recommendations.empty:
+        recommendation_working = recommendations.copy()
+        recommendation_working["priority_score"] = pd.to_numeric(
+            recommendation_working["priority_score"], errors="coerce"
+        )
+        recommendation_working["confidence_score"] = pd.to_numeric(
+            recommendation_working["confidence_score"], errors="coerce"
+        )
+        recommendation_working = recommendation_working.dropna(
+            subset=["priority_score", "confidence_score"]
+        ).copy()
+        if not recommendation_working.empty:
+            recommendation_working = recommendation_working.sort_values(
+                ["priority_score", "confidence_score", "player_name"],
+                ascending=[False, False, True],
+            )
+            top_recommendation = recommendation_working.iloc[0]
+            recommendation_sentence = (
+                f"Top fantasy signal: {top_recommendation['player_name']} profiles as "
+                f"{top_recommendation['insight_type']} with recommendation "
+                f"{top_recommendation['recommendation']} and priority "
+                f"{float(top_recommendation['priority_score']):.1f}."
+            )
+
+    if not rankings.empty:
+        ranking_working = rankings.copy()
+        rank_col = (
+            "fantasy_rank_9cat_proxy"
+            if "fantasy_rank_9cat_proxy" in ranking_working.columns
+            else "overall_rank"
+        )
+        if rank_col in ranking_working.columns:
+            ranking_working[rank_col] = pd.to_numeric(
+                ranking_working[rank_col], errors="coerce"
+            )
+            ranking_working = ranking_working.dropna(subset=[rank_col]).copy()
+            if not ranking_working.empty:
+                ranking_working = ranking_working.sort_values(
+                    [rank_col, "player_name"], ascending=[True, True]
+                )
+                top_ranked = ranking_working.iloc[0]
+                ranking_sentence = (
+                    f"Current fantasy leader: {top_ranked['player_name']} sits at rank "
+                    f"{int(top_ranked[rank_col])} with tier "
+                    f"{top_ranked.get('recommendation_tier', 'n/a')}."
+                )
+
     headline = (
-        f"{latest_row['pts_leader']} sets the pace for the {season} nightly board"
-        if not trend_player
-        else f"{trend_player} headlines the {season} trend watch"
+        f"{top_recommendation['player_name']} headlines the {season} fantasy board"
+        if top_recommendation is not None
+        else (
+            f"{latest_row['pts_leader']} sets the pace for the {season} nightly board"
+            if not trend_player
+            else f"{trend_player} headlines the {season} trend watch"
+        )
     )
     dek = (
         f"Latest leaders from {latest_game_date.isoformat()} are anchored by "
         f"{latest_row['pts_leader']} in scoring, {latest_row['reb_leader']} on the glass, "
-        f"and {latest_row['ast_leader']} as the top playmaker."
+        f"and {latest_row['ast_leader']} as the top playmaker. {recommendation_sentence}"
     )
     body = "\n\n".join(
         [
@@ -748,6 +1178,8 @@ def build_analysis_snapshot_record(
                 f"{int(latest_row['ast'])} assists."
             ),
             trend_sentence,
+            ranking_sentence,
+            recommendation_sentence,
             (
                 f"This snapshot was generated deterministically from gold tables and linked to "
                 f"pipeline run {source_run_id}. Freshness is measured from "

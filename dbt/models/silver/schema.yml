@@ -32,3 +32,16 @@ models:
         tests: [not_null]
       - name: opponent_abbr
         tests: [not_null]
+  - name: stg_schedule_clean
+    columns:
+      - name: schedule_date
+        tests: [not_null]
+      - name: team_abbr
+        tests: [not_null]
+      - name: opponent_abbr
+        tests: [not_null]
+      - name: game_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['scheduled', 'final', 'postponed']

@@ -32,10 +32,34 @@
       a { color: inherit; }
       .nav {
         display: flex;
+        flex-wrap: wrap;
         gap: 1rem;
         margin-bottom: 1.5rem;
         font-size: 0.95rem;
         color: var(--muted);
+      }
+      .search-form {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        margin-left: auto;
+      }
+      .search-form input {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 0.45rem 0.75rem;
+        min-width: 12rem;
+        background: rgba(255, 255, 255, 0.9);
+      }
+      .search-form button,
+      .button-link {
+        border: 0;
+        border-radius: 999px;
+        padding: 0.5rem 0.9rem;
+        background: var(--accent);
+        color: white;
+        text-decoration: none;
+        font-size: 0.9rem;
       }
       .hero {
         background: var(--panel);
@@ -73,6 +97,45 @@
         border-radius: 18px;
         padding: 1.25rem;
       }
+      .stack {
+        display: grid;
+        gap: 0.9rem;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        margin: 0.75rem 0 0;
+      }
+      .chip {
+        display: inline-flex;
+        padding: 0.28rem 0.65rem;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--ink);
+        font-size: 0.82rem;
+      }
+      .metric-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 0.75rem;
+      }
+      .metric {
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 0.85rem;
+        background: rgba(255, 248, 238, 0.8);
+      }
+      .metric-label {
+        color: var(--muted);
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      .metric-value {
+        margin-top: 0.3rem;
+        font-size: 1.2rem;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -100,6 +163,11 @@
       @media (max-width: 720px) {
         main { padding: 1.25rem 1rem 2rem; }
         .hero, .card { border-radius: 16px; }
+        .search-form {
+          width: 100%;
+          margin-left: 0;
+        }
+        .search-form input { flex: 1 1 auto; min-width: 0; }
       }
     </style>
   </head>
@@ -107,8 +175,37 @@
     <main>
       <nav class="nav">
         <a href="/">Home</a>
+        <a href="/recommendations">Recommendations</a>
         <a href="/analysis">Analysis</a>
         <span>Season {{ season }}</span>
+        <form class="search-form" id="player-search-form">
+          <input type="search" name="q" placeholder="Search player" aria-label="Search player" />
+          <button type="submit">Search</button>
+          <span id="search-msg" style="display:none;color:var(--accent);font-size:0.85rem;"></span>
+        </form>
+        <script>
+          document.getElementById('player-search-form').addEventListener('submit', function(e) {
+            e.preventDefault();
+            var q = this.querySelector('input[name="q"]').value.trim();
+            var msg = document.getElementById('search-msg');
+            if (!q) return;
+            msg.style.display = 'none';
+            fetch('/api/players/search?q=' + encodeURIComponent(q))
+              .then(function(r) { return r.json(); })
+              .then(function(data) {
+                if (data.length > 0) {
+                  window.location.href = '/players/' + data[0].player_id;
+                } else {
+                  msg.textContent = 'No results found';
+                  msg.style.display = 'inline';
+                }
+              })
+              .catch(function() {
+                msg.textContent = 'Search failed';
+                msg.style.display = 'inline';
+              });
+          });
+        </script>
       </nav>
       {% block content %}{% endblock %}
     </main>

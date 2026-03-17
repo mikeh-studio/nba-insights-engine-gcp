@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div class="eyebrow">Player Detail</div>
+    <h1>{{ page_title }}</h1>
+    <p class="subhead">
+      Ranking, recent form, category profile, opportunity context, and live recommendations.
+    </p>
+    <div class="status">
+      Rank {{ player_detail.player.overall_rank }} · score {{ player_detail.player.recommendation_score }}
+    </div>
+    <div class="chips">
+      {% if player_detail.player.category_strengths %}
+        <span class="chip">Strengths: {{ player_detail.player.category_strengths }}</span>
+      {% endif %}
+      {% if player_detail.player.category_risks %}
+        <span class="chip">Risks: {{ player_detail.player.category_risks }}</span>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="grid">
+    <article class="card">
+      <h2>Opportunity Outlook</h2>
+      {% if player_detail.opportunity %}
+        <div class="metric-grid">
+          <div class="metric">
+            <div class="metric-label">Games Next 7d</div>
+            <div class="metric-value">{{ player_detail.opportunity.games_next_7d }}</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Back-to-Backs</div>
+            <div class="metric-value">{{ player_detail.opportunity.back_to_backs_next_7d }}</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Next Opponent</div>
+            <div class="metric-value">{{ player_detail.opportunity.next_opponent }}</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">Opportunity Score</div>
+            <div class="metric-value">{{ player_detail.opportunity.opportunity_score }}</div>
+          </div>
+        </div>
+      {% else %}
+        <p>No opportunity outlook is available yet.</p>
+      {% endif %}
+    </article>
+
+    <article class="card">
+      <h2>Live Recommendations</h2>
+      <div class="stack">
+        {% for item in player_detail.insights %}
+          <div>
+            <h3>{{ item.title }}</h3>
+            <p class="meta">{{ item.insight_type }} · {{ item.recommendation }} · confidence {{ item.confidence_score }}</p>
+            <p>{{ item.summary }}</p>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="grid">
+    <article class="card">
+      <h2>Recent Form</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Window</th>
+            <th>PTS</th>
+            <th>REB</th>
+            <th>AST</th>
+            <th>STL</th>
+            <th>BLK</th>
+            <th>3PM</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in player_detail.recent_form %}
+            <tr>
+              <td>{{ item.window_label }}</td>
+              <td>{{ item.avg_pts }}</td>
+              <td>{{ item.avg_reb }}</td>
+              <td>{{ item.avg_ast }}</td>
+              <td>{{ item.avg_stl }}</td>
+              <td>{{ item.avg_blk }}</td>
+              <td>{{ item.avg_fg3m }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+
+    <article class="card">
+      <h2>Category Profile</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Impact</th>
+            <th>Tier</th>
+            <th>Direction</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in player_detail.category_profile %}
+            <tr>
+              <td>{{ item.category }}</td>
+              <td>{{ item.impact_score }}</td>
+              <td>{{ item.category_tier }}</td>
+              <td>{{ item.category_direction }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+  </section>
+{% endblock %}

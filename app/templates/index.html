@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="hero">
-    <div class="eyebrow">Public Read-Only Service</div>
+    <div class="eyebrow">Fantasy Decision Surface</div>
     <h1>{{ page_title }}</h1>
     <p class="subhead">
-      Daily leaders, player trends, deterministic analysis, and pipeline freshness for the fixed
-      {{ season }} warehouse scope.
+      Warehouse-driven recommendations, 9-cat rankings, player trends, and freshness for the fixed
+      {{ season }} scope.
     </p>
     <div class="status">
       Freshness: {{ health.status }}{% if health.age_hours is not none %} · {{ health.age_hours }}h old{% endif %}
@@ -13,6 +13,66 @@
   </section>
 
   <section class="grid">
+    <article class="card">
+      <h2>Top Recommendations</h2>
+      <div class="stack">
+        {% for item in recommendations %}
+          <div>
+            <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
+            <p class="meta">{{ item.insight_type }} · {{ item.recommendation }} · priority {{ item.priority_score }}</p>
+            <p><strong>{{ item.title }}</strong></p>
+            <p>{{ item.summary }}</p>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="card">
+      <h2>9-Cat Rankings</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Player</th>
+            <th>Score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in rankings %}
+            <tr>
+              <td>{{ item.overall_rank }}</td>
+              <td><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></td>
+              <td>{{ item.recommendation_score }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section class="grid">
+    <article class="card">
+      <h2>Top Trends</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Stat</th>
+            <th>Delta</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in trends %}
+            <tr>
+              <td>{{ item.player_name }}</td>
+              <td>{{ item.stat }}</td>
+              <td>{{ item.delta }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+
     <article class="card">
       <h2>Latest Leaderboard</h2>
       <table>
@@ -36,28 +96,6 @@
         </tbody>
       </table>
     </article>
-
-    <article class="card">
-      <h2>Top Trends</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Player</th>
-            <th>Stat</th>
-            <th>Delta</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for item in trends %}
-            <tr>
-              <td>{{ item.player_name }}</td>
-              <td>{{ item.stat }}</td>
-              <td>{{ item.delta }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </article>
   </section>
 
   <section class="grid">
@@ -69,6 +107,7 @@
           Snapshot {{ analysis.snapshot_id }} · {{ analysis.snapshot_date }} · source run {{ analysis.source_run_id }}
         </p>
         <p>{{ analysis.dek }}</p>
+        <a class="button-link" href="/analysis">Read full snapshot</a>
       {% else %}
         <p>No deterministic analysis snapshot is available yet.</p>
       {% endif %}
