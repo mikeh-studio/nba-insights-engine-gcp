@@ -30,3 +30,11 @@ sources:
               - accepted_values:
                   arguments:
                     values: ['W', 'L']
+      - name: raw_schedule
+        columns:
+          - name: schedule_date
+            tests: [not_null]
+          - name: team_abbr
+            tests: [not_null]
+          - name: opponent_abbr
+            tests: [not_null]

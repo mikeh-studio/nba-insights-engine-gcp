@@ -252,3 +252,72 @@ def test_build_analysis_snapshot_record_is_deterministic():
         "The latest completed game day in the 2025-26 warehouse is 2026-02-10."
         in record["body"]
     )
+
+
+def test_build_analysis_snapshot_record_includes_fantasy_recommendations():
+    daily_leaders = pd.DataFrame(
+        [
+            {
+                "season": "2025-26",
+                "game_date": "2026-02-10",
+                "pts_leader": "Jayson Tatum",
+                "pts_matchup": "BOS vs. NYK",
+                "pts": 34,
+                "reb_leader": "Karl-Anthony Towns",
+                "reb": 14,
+                "ast_leader": "Trae Young",
+                "ast": 11,
+            }
+        ]
+    )
+    trends = pd.DataFrame(
+        [
+            {
+                "season": "2025-26",
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "stat": "PTS",
+                "recent_games": 5,
+                "prior_games": 5,
+                "recent_avg": 28.4,
+                "prior_avg": 22.0,
+                "delta": 6.4,
+                "pct_change": 29.1,
+            }
+        ]
+    )
+    recommendations = pd.DataFrame(
+        [
+            {
+                "player_name": "Tyrese Maxey",
+                "insight_type": "waiver_add",
+                "recommendation": "add",
+                "priority_score": 94.0,
+                "confidence_score": 88.0,
+            }
+        ]
+    )
+    rankings = pd.DataFrame(
+        [
+            {
+                "player_name": "Nikola Jokic",
+                "fantasy_rank_9cat_proxy": 1,
+                "recommendation_tier": "strong_add",
+            }
+        ]
+    )
+
+    record = pipeline.build_analysis_snapshot_record(
+        season="2025-26",
+        daily_leaders=daily_leaders,
+        trends=trends,
+        recommendations=recommendations,
+        rankings=rankings,
+        source_run_id="manual__2026-02-10T00:00:00+00:00",
+        created_at_utc="2026-02-11T01:02:03+00:00",
+        freshness_ts="2026-02-10T13:00:00+00:00",
+    )
+
+    assert record["headline"] == "Tyrese Maxey headlines the 2025-26 fantasy board"
+    assert "Top fantasy signal: Tyrese Maxey profiles as waiver_add" in record["body"]
+    assert "Current fantasy leader: Nikola Jokic sits at rank 1" in record["body"]

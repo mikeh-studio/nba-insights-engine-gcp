@@ -12,6 +12,7 @@ class Settings:
     gold_dataset: str
     metadata_dataset: str
     freshness_threshold_hours: int
+    max_search_results: int
 
 
 def get_settings() -> Settings:
@@ -20,4 +21,5 @@ def get_settings() -> Settings:
         gold_dataset=os.getenv("BQ_DATASET_GOLD", "nba_gold"),
         metadata_dataset=os.getenv("BQ_METADATA_DATASET", "nba_metadata"),
         freshness_threshold_hours=int(os.getenv("API_FRESHNESS_THRESHOLD_HOURS", "36")),
+        max_search_results=int(os.getenv("API_MAX_SEARCH_RESULTS", "12")),
     )

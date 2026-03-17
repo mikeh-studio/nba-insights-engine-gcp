@@ -1,4 +1,4 @@
-"""NBA Analytics Pipeline DAG for Google Cloud Composer.
+"""NBA Analytics Pipeline DAG for self-hosted Airflow.
 
 Target shape:
     extract_incremental -> load_staging -> dq_gate -> merge_raw
@@ -29,7 +29,10 @@ def get_config(key: str, default: str | None = None) -> str | None:
 
 
 def get_project_id() -> str:
-    return get_config("BQ_PROJECT", get_config("GCP_PROJECT_ID"))
+    pid = get_config("BQ_PROJECT", get_config("GCP_PROJECT_ID"))
+    if not pid:
+        raise ValueError("BQ_PROJECT or GCP_PROJECT_ID must be configured")
+    return pid
 
 
 def get_dataset(dataset_key: str, default_name: str) -> str:
@@ -37,7 +40,7 @@ def get_dataset(dataset_key: str, default_name: str) -> str:
 
 
 def get_dbt_repo_root() -> Path:
-    """Resolve the dbt project root in both local and Composer layouts."""
+    """Resolve the dbt project root in local Airflow-friendly layouts."""
     dag_file = Path(__file__).resolve()
     candidates = [dag_file.parents[1], dag_file.parent]
 
@@ -71,7 +74,7 @@ default_args = {
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=2),
     default_args=default_args,
-    tags=["nba", "airflow", "bigquery", "dbt", "cloud-composer"],
+    tags=["nba", "airflow", "bigquery", "dbt", "self-hosted"],
 )
 def nba_analytics_pipeline():
     @task(
@@ -80,7 +83,7 @@ def nba_analytics_pipeline():
         execution_timeout=timedelta(minutes=45),
     )
     def extract_incremental() -> dict:
-        """Fetch game logs, apply replay-window filtering, and land a CSV in GCS."""
+        """Fetch player game logs, apply replay-window filtering, and land a CSV in GCS."""
         import pandas as pd
         from google.cloud import bigquery as bq
         import nba_pipeline as pipeline
@@ -118,9 +121,9 @@ def nba_analytics_pipeline():
         if incremental_df.empty:
             logger.info("No rows remain after replay-window filtering")
             return {
+                "domain": "game_logs",
                 "gcs_uri": "",
                 "row_count": 0,
-                "player_count": 0,
                 "season": season,
                 "watermark_before": state["watermark_date"].isoformat()
                 if state["watermark_date"]
@@ -142,9 +145,9 @@ def nba_analytics_pipeline():
         )
 
         return {
+            "domain": "game_logs",
             "gcs_uri": gcs_uri,
             "row_count": len(incremental_df),
-            "player_count": int(incremental_df["PLAYER_ID"].nunique()),
             "season": season,
             "watermark_before": state["watermark_date"].isoformat()
             if state["watermark_date"]
@@ -152,9 +155,50 @@ def nba_analytics_pipeline():
             "watermark_after": watermark_after.isoformat() if watermark_after else None,
         }
 
+    @task(retries=2, retry_delay=timedelta(minutes=5))
+    def extract_schedule_context() -> dict:
+        """Fetch the upcoming schedule window and land a CSV in GCS."""
+        import pandas as pd
+        import nba_pipeline as pipeline
+
+        season = SUPPORTED_SEASON
+        horizon_days = int(get_config("NBA_SCHEDULE_LOOKAHEAD_DAYS", "7"))
+        project_id = get_project_id()
+        bucket_name = get_config("GCS_BUCKET_NAME")
+        schedule_df = pipeline.get_upcoming_schedule(
+            season=season,
+            horizon_days=horizon_days,
+        )
+        if schedule_df.empty:
+            logger.info(
+                "No schedule rows available for the configured lookahead window"
+            )
+            return {
+                "domain": "schedule",
+                "gcs_uri": "",
+                "row_count": 0,
+                "season": season,
+            }
+
+        run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        min_date = schedule_df["SCHEDULE_DATE"].min().strftime("%Y%m%d")
+        max_date = schedule_df["SCHEDULE_DATE"].max().strftime("%Y%m%d")
+        blob_path = (
+            f"nba_data/{season}/landing/{run_stamp}_{min_date}_{max_date}_schedule.csv"
+        )
+        gcs_uri = pipeline.upload_df_to_gcs(
+            schedule_df, project_id, bucket_name, blob_path
+        )
+        return {
+            "domain": "schedule",
+            "gcs_uri": gcs_uri,
+            "row_count": len(schedule_df),
+            "season": season,
+        }
+
     @task(retries=2, retry_delay=timedelta(minutes=2))
-    def load_staging(extract_result: dict) -> dict:
-        """Load landed incremental rows to staging."""
+    def load_game_log_staging(extract_result: dict) -> dict:
+        """Load landed game log rows to staging."""
         from google.cloud import bigquery as bq
         import nba_pipeline as pipeline
 
@@ -167,8 +211,11 @@ def nba_analytics_pipeline():
         staging_table = f"{project_id}.{bronze_dataset}.stg_game_logs"
 
         if extract_result["row_count"] == 0:
-            logger.info("Skipping staging load because extract produced no rows")
+            logger.info(
+                "Skipping game log staging load because extract produced no rows"
+            )
             return {
+                "domain": "game_logs",
                 "staging_table": staging_table,
                 "row_count": 0,
                 "season": extract_result["season"],
@@ -184,8 +231,8 @@ def nba_analytics_pipeline():
             pipeline.get_game_logs_schema(),
             write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
         )
-
         return {
+            "domain": "game_logs",
             "staging_table": staging_table,
             "row_count": extract_result["row_count"],
             "season": extract_result["season"],
@@ -194,29 +241,81 @@ def nba_analytics_pipeline():
             "gcs_uri": extract_result["gcs_uri"],
         }
 
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def load_schedule_staging(extract_result: dict) -> dict:
+        """Load landed schedule rows to staging."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        location = get_config("BQ_LOCATION", "US")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{bronze_dataset}", location)
+        staging_table = f"{project_id}.{bronze_dataset}.stg_schedule_context"
+
+        if extract_result["row_count"] == 0:
+            return {
+                "domain": "schedule",
+                "staging_table": staging_table,
+                "row_count": 0,
+                "season": extract_result["season"],
+                "gcs_uri": extract_result["gcs_uri"],
+            }
+
+        pipeline.load_gcs_to_bigquery(
+            client,
+            extract_result["gcs_uri"],
+            staging_table,
+            pipeline.get_schedule_schema(),
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+        )
+        return {
+            "domain": "schedule",
+            "staging_table": staging_table,
+            "row_count": extract_result["row_count"],
+            "season": extract_result["season"],
+            "gcs_uri": extract_result["gcs_uri"],
+        }
+
     @task(retries=0)
-    def dq_gate(load_result: dict) -> dict:
-        """Run hard DQ checks unless the run is a no-op."""
+    def dq_game_log_staging(load_result: dict) -> dict:
+        """Run hard DQ checks for game logs unless the run is a no-op."""
         from google.cloud import bigquery as bq
         import nba_pipeline as pipeline
 
         if load_result["row_count"] == 0:
-            logger.info("Skipping DQ because no rows were staged")
             return load_result
 
         client = bq.Client(project=get_project_id())
-        dq_results = pipeline.run_data_quality_checks(
+        load_result["dq_results"] = pipeline.run_data_quality_checks(
             client,
             load_result["staging_table"],
             season=SUPPORTED_SEASON,
         )
-        logger.info("DQ passed: %s", dq_results)
-        load_result["dq_results"] = dq_results
+        return load_result
+
+    @task(retries=0)
+    def dq_schedule_staging(load_result: dict) -> dict:
+        """Run DQ checks for upcoming schedule rows."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        if load_result["row_count"] == 0:
+            load_result["dq_results"] = {}
+            return load_result
+
+        client = bq.Client(project=get_project_id())
+        load_result["dq_results"] = pipeline.run_schedule_quality_checks(
+            client,
+            load_result["staging_table"],
+            season=SUPPORTED_SEASON,
+        )
         return load_result
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
-    def merge_raw(load_result: dict) -> dict:
-        """Merge staging rows into the bronze raw table."""
+    def merge_game_logs(load_result: dict) -> dict:
+        """Merge staged game log rows into the bronze raw table."""
         from google.cloud import bigquery as bq
         import nba_pipeline as pipeline
 
@@ -225,8 +324,8 @@ def nba_analytics_pipeline():
         raw_table = f"{project_id}.{bronze_dataset}.raw_game_logs"
 
         if load_result["row_count"] == 0:
-            logger.info("Skipping raw merge because no rows were staged")
             return {
+                "domain": "game_logs",
                 "raw_table": raw_table,
                 "rows_loaded": 0,
                 "rows_inserted": 0,
@@ -243,6 +342,7 @@ def nba_analytics_pipeline():
             client, load_result["staging_table"], raw_table
         )
         return {
+            "domain": "game_logs",
             "raw_table": raw_table,
             "rows_loaded": load_result["row_count"],
             "rows_inserted": result["inserted"],
@@ -255,10 +355,81 @@ def nba_analytics_pipeline():
         }
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
+    def merge_schedule_context(load_result: dict) -> dict:
+        """Merge staged schedule rows into the bronze raw table."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        raw_table = f"{project_id}.{bronze_dataset}.raw_schedule"
+
+        if load_result["row_count"] == 0:
+            return {
+                "domain": "schedule",
+                "raw_table": raw_table,
+                "rows_loaded": 0,
+                "rows_inserted": 0,
+                "rows_updated": 0,
+                "season": load_result["season"],
+                "gcs_uri": load_result["gcs_uri"],
+                "dq_results": load_result.get("dq_results", {}),
+            }
+
+        client = bq.Client(project=project_id)
+        result = pipeline.create_and_merge_schedule_table(
+            client, load_result["staging_table"], raw_table
+        )
+        return {
+            "domain": "schedule",
+            "raw_table": raw_table,
+            "rows_loaded": load_result["row_count"],
+            "rows_inserted": result["inserted"],
+            "rows_updated": result["updated"],
+            "season": load_result["season"],
+            "gcs_uri": load_result["gcs_uri"],
+            "dq_results": load_result.get("dq_results", {}),
+        }
+
+    @task(retries=0)
+    def combine_pipeline_results(game_result: dict, schedule_result: dict) -> dict:
+        """Combine per-domain results into a single warehouse build context."""
+        all_gcs = [
+            value
+            for value in [
+                game_result.get("gcs_uri", ""),
+                schedule_result.get("gcs_uri", ""),
+            ]
+            if value
+        ]
+        return {
+            "season": game_result["season"],
+            "watermark_before": game_result.get("watermark_before"),
+            "watermark_after": game_result.get("watermark_after"),
+            "gcs_uri": ",".join(all_gcs),
+            "rows_loaded": game_result["rows_loaded"],
+            "rows_inserted": game_result["rows_inserted"],
+            "rows_updated": game_result["rows_updated"],
+            "schedule_rows_loaded": schedule_result["rows_loaded"],
+            "schedule_rows_inserted": schedule_result["rows_inserted"],
+            "schedule_rows_updated": schedule_result["rows_updated"],
+            "dq_results": {
+                "game_logs": game_result.get("dq_results", {}),
+                "schedule": schedule_result.get("dq_results", {}),
+            },
+            "should_build": any(
+                [
+                    game_result["rows_loaded"] > 0,
+                    schedule_result["rows_loaded"] > 0,
+                ]
+            ),
+        }
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
     def dbt_build(merge_result: dict) -> dict:
-        """Run dbt models and tests after the raw merge."""
-        if merge_result["rows_loaded"] == 0:
-            logger.info("Skipping dbt build because the run had no staged rows")
+        """Run dbt models and tests after the bronze merges."""
+        if not merge_result["should_build"]:
+            logger.info("Skipping dbt build because no source domain produced rows")
             merge_result["dbt_status"] = "skipped"
             return merge_result
 
@@ -306,8 +477,8 @@ def nba_analytics_pipeline():
         merge_result["analysis_snapshot_status"] = "skipped"
         merge_result["analysis_snapshot_id"] = ""
 
-        if merge_result["rows_loaded"] == 0:
-            logger.info("Skipping analysis snapshot because the run had no staged rows")
+        if not merge_result["should_build"]:
+            logger.info("Skipping analysis snapshot because no source domain changed")
             return merge_result
 
         context = get_current_context()
@@ -336,6 +507,22 @@ def nba_analytics_pipeline():
             LIMIT 30
             """
         ).to_dataframe()
+        recommendations = client.query(
+            f"""
+            SELECT *
+            FROM `{project_id}.{gold_dataset}.fantasy_insights`
+            ORDER BY as_of_date DESC, priority_score DESC, confidence_score DESC, player_name
+            LIMIT 30
+            """
+        ).to_dataframe()
+        rankings = client.query(
+            f"""
+            SELECT *
+            FROM `{project_id}.{gold_dataset}.player_fantasy_rankings`
+            ORDER BY fantasy_rank_9cat_proxy ASC, recommendation_score DESC, player_name
+            LIMIT 30
+            """
+        ).to_dataframe()
         freshness_row = client.query(
             f"""
             SELECT MAX(ingested_at_utc) AS freshness_ts
@@ -356,6 +543,8 @@ def nba_analytics_pipeline():
             season=merge_result["season"],
             daily_leaders=daily_leaders,
             trends=trends,
+            recommendations=recommendations,
+            rankings=rankings,
             source_run_id=context["run_id"],
             created_at_utc=pd.Timestamp.now(tz="UTC"),
             snapshot_date=context["data_interval_end"],
@@ -397,7 +586,9 @@ def nba_analytics_pipeline():
             season=run_result["season"],
             status="success",
             gcs_uri=run_result["gcs_uri"],
-            rows_extracted=run_result["rows_loaded"],
+            rows_extracted=(
+                run_result["rows_loaded"] + run_result.get("schedule_rows_loaded", 0)
+            ),
             rows_loaded=run_result["rows_loaded"],
             rows_inserted=run_result["rows_inserted"],
             rows_updated=run_result["rows_updated"],
@@ -409,6 +600,7 @@ def nba_analytics_pipeline():
                 f"dbt_status={run_result.get('dbt_status', 'unknown')};"
                 f"analysis_snapshot_status={run_result.get('analysis_snapshot_status', 'unknown')};"
                 f"analysis_snapshot_id={run_result.get('analysis_snapshot_id', '')};"
+                f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
                 f"dq={run_result.get('dq_results', {})}"
             ),
         )
@@ -416,10 +608,19 @@ def nba_analytics_pipeline():
         return run_result
 
     extracted = extract_incremental()
-    staged = load_staging(extracted)
-    checked = dq_gate(staged)
-    merged = merge_raw(checked)
-    modeled = dbt_build(merged)
+    extracted_schedule = extract_schedule_context()
+
+    staged = load_game_log_staging(extracted)
+    staged_schedule = load_schedule_staging(extracted_schedule)
+
+    checked = dq_game_log_staging(staged)
+    checked_schedule = dq_schedule_staging(staged_schedule)
+
+    merged = merge_game_logs(checked)
+    merged_schedule = merge_schedule_context(checked_schedule)
+
+    combined = combine_pipeline_results(merged, merged_schedule)
+    modeled = dbt_build(combined)
     snapshotted = build_analysis_snapshot(modeled)
     publish_run_metrics(snapshotted)
 

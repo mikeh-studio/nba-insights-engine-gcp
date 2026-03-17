@@ -8,11 +8,14 @@ with numbered as (
         season,
         player_id,
         player_name,
+        min,
         pts,
         reb,
         ast,
         stl,
         blk,
+        tov,
+        fantasy_points_simple,
         row_number() over (
             partition by player_id
             order by game_date desc
@@ -87,6 +90,45 @@ blk_trend as (
     from base
     group by 2, 3
 ),
+tov_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'TOV' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then tov end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then tov end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+min_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'MIN' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then min end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then min end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
+fantasy_points_trend as (
+    select
+        max(season) as season,
+        player_id,
+        player_name,
+        'FANTASY_POINTS_SIMPLE' as stat,
+        countif(game_num <= 5) as recent_games,
+        countif(game_num between 6 and 10) as prior_games,
+        round(avg(case when game_num <= 5 then fantasy_points_simple end), 1) as recent_avg,
+        round(avg(case when game_num between 6 and 10 then fantasy_points_simple end), 1) as prior_avg
+    from base
+    group by 2, 3
+),
 unioned as (
     select * from pts_trend
     union all
@@ -97,6 +139,12 @@ unioned as (
     select * from stl_trend
     union all
     select * from blk_trend
+    union all
+    select * from tov_trend
+    union all
+    select * from min_trend
+    union all
+    select * from fantasy_points_trend
 )
 select
     season,

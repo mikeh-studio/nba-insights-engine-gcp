@@ -59,6 +59,8 @@ models:
           - accepted_values:
               arguments:
                 values: ['W', 'L']
+      - name: fantasy_points_simple
+        tests: [not_null]
   - name: dim_player
     columns:
       - name: player_id
@@ -92,7 +94,7 @@ models:
           - not_null
           - accepted_values:
               arguments:
-                values: ['PTS', 'REB', 'AST', 'STL', 'BLK']
+                values: ['PTS', 'REB', 'AST', 'STL', 'BLK', 'TOV', 'MIN', 'FANTASY_POINTS_SIMPLE']
       - name: player_id
         tests:
           - not_null
@@ -122,3 +124,79 @@ models:
           - accepted_values:
               arguments:
                 values: ['2025-26']
+  - name: player_recent_form
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+      - name: team_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+  - name: player_category_profile
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+      - name: category_coverage_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['partial_until_fg_ft_3pt_available']
+  - name: player_opportunity_outlook
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+          - unique
+      - name: team_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+  - name: player_fantasy_rankings
+    columns:
+      - name: player_id
+        tests:
+          - not_null
+          - unique
+      - name: recommendation_tier
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['strong_add', 'hold_or_stream', 'watchlist']
+  - name: fantasy_insights
+    columns:
+      - name: insight_id
+        tests: [not_null, unique]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: insight_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['hot_streak', 'minutes_spike', 'sell_high']
+  - name: fantasy_recommendation_backtest
+    columns:
+      - name: insight_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('fantasy_insights')
+                field: insight_id
+      - name: backtest_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['pending', 'hit', 'miss']
