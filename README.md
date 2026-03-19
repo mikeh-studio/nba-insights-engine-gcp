@@ -1,17 +1,23 @@
-# NBA Data GCP
+# NBA Data Platform
 
-Production-style NBA data pipeline and public fantasy-facing service for the `2025-26` season only.
+Production-style NBA data pipeline and public fantasy-facing service for the `2025-26` season only. Built on **GCP** (BigQuery, GCS, Cloud Run) with an optional **AWS** secondary warehouse (Redshift Serverless, S3).
 
 The v1 target architecture is:
 
 `NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> fantasy rankings + insights -> deterministic analysis snapshots -> Cloud Run site/API`
 
+With optional Redshift sync:
+
+`BigQuery bronze -> GCS Parquet -> S3 -> Redshift COPY -> dbt Redshift models`
+
 Core decisions for this version:
 
-- BigQuery remains the warehouse system of record.
-- dbt remains the bronze/silver/gold transformation layer.
+- BigQuery (GCP) is the warehouse system of record.
+- Redshift Serverless (AWS) is an optional secondary warehouse for cross-cloud portfolio/learning.
+- dbt remains the bronze/silver/gold transformation layer, with cross-database macros for BigQuery/Redshift compatibility.
 - Self-hosted Airflow is the supported orchestration path.
 - Cloud Run is the public read-only website/API target.
+- Infrastructure is managed by Terraform — GCP core infra and AWS Redshift infra (`infra/terraform-aws/`).
 - The operational scope is fixed to season `2025-26`.
 - Claude/Anthropic is not part of the v1 runtime path.
 - Analysis output is deterministic and template-based, not LLM-generated.
