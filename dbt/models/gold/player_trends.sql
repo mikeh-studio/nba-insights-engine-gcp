@@ -31,8 +31,8 @@ pts_trend as (
         player_id,
         player_name,
         'PTS' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then pts end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then pts end), 1) as prior_avg
     from base
@@ -44,8 +44,8 @@ reb_trend as (
         player_id,
         player_name,
         'REB' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then reb end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then reb end), 1) as prior_avg
     from base
@@ -57,8 +57,8 @@ ast_trend as (
         player_id,
         player_name,
         'AST' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then ast end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then ast end), 1) as prior_avg
     from base
@@ -70,8 +70,8 @@ stl_trend as (
         player_id,
         player_name,
         'STL' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then stl end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then stl end), 1) as prior_avg
     from base
@@ -83,8 +83,8 @@ blk_trend as (
         player_id,
         player_name,
         'BLK' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then blk end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then blk end), 1) as prior_avg
     from base
@@ -96,8 +96,8 @@ tov_trend as (
         player_id,
         player_name,
         'TOV' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then tov end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then tov end), 1) as prior_avg
     from base
@@ -109,8 +109,8 @@ min_trend as (
         player_id,
         player_name,
         'MIN' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then min end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then min end), 1) as prior_avg
     from base
@@ -122,8 +122,8 @@ fantasy_points_trend as (
         player_id,
         player_name,
         'FANTASY_POINTS_SIMPLE' as stat,
-        countif(game_num <= 5) as recent_games,
-        countif(game_num between 6 and 10) as prior_games,
+        {{ countif('game_num <= 5') }} as recent_games,
+        {{ countif('game_num between 6 and 10') }} as prior_games,
         round(avg(case when game_num <= 5 then fantasy_points_simple end), 1) as recent_avg,
         round(avg(case when game_num between 6 and 10 then fantasy_points_simple end), 1) as prior_avg
     from base
@@ -156,6 +156,6 @@ select
     recent_avg,
     prior_avg,
     round(recent_avg - prior_avg, 1) as delta,
-    round(safe_divide(recent_avg - prior_avg, nullif(prior_avg, 0)) * 100, 1) as pct_change
+    round({{ safe_divide('recent_avg - prior_avg', 'nullif(prior_avg, 0)') }} * 100, 1) as pct_change
 from unioned
 where recent_games >= 3 and prior_games >= 3

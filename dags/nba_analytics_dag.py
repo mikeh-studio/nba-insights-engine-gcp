@@ -601,6 +601,7 @@ def nba_analytics_pipeline():
                 f"analysis_snapshot_status={run_result.get('analysis_snapshot_status', 'unknown')};"
                 f"analysis_snapshot_id={run_result.get('analysis_snapshot_id', '')};"
                 f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
+                f"redshift_status={run_result.get('redshift_status', get_config('ENABLE_REDSHIFT', 'false'))};"
                 f"dq={run_result.get('dq_results', {})}"
             ),
         )
@@ -619,7 +620,127 @@ def nba_analytics_pipeline():
     merged = merge_game_logs(checked)
     merged_schedule = merge_schedule_context(checked_schedule)
 
+    @task.branch(retries=0)
+    def check_redshift_enabled(combined_result: dict) -> str:
+        """Branch: run Redshift sync only when ENABLE_REDSHIFT=true."""
+        enabled = get_config("ENABLE_REDSHIFT", "false").lower() == "true"
+        if enabled and combined_result["should_build"]:
+            return "export_bigquery_bronze"
+        return "skip_redshift_sync"
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def export_bigquery_bronze(combined_result: dict) -> dict:
+        """Export bronze tables from BigQuery to GCS as Parquet."""
+        import nba_redshift_sync as sync
+
+        project_id = get_project_id()
+        gcs_bucket = get_config("GCS_BUCKET_NAME")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        import pandas as pd
+
+        run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        gcs_prefix = f"redshift_sync/{run_stamp}"
+
+        for table in ["raw_game_logs", "raw_schedule"]:
+            sync.export_bq_to_gcs_parquet(
+                project_id, bronze_dataset, table, gcs_bucket, gcs_prefix,
+            )
+
+        combined_result["redshift_gcs_prefix"] = gcs_prefix
+        return combined_result
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def sync_to_s3(combined_result: dict) -> dict:
+        """Copy Parquet files from GCS to S3."""
+        import nba_redshift_sync as sync
+
+        gcs_bucket = get_config("GCS_BUCKET_NAME")
+        s3_bucket = get_config("AWS_S3_BUCKET_NAME")
+        gcs_prefix = combined_result["redshift_gcs_prefix"]
+
+        for table in ["raw_game_logs", "raw_schedule"]:
+            sync.copy_gcs_to_s3(
+                gcs_bucket, f"{gcs_prefix}/{table}/",
+                s3_bucket, f"{gcs_prefix}/{table}",
+            )
+
+        combined_result["redshift_s3_prefix"] = gcs_prefix
+        return combined_result
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def load_redshift_bronze(combined_result: dict) -> dict:
+        """Load S3 Parquet into Redshift and merge."""
+        import nba_redshift_sync as sync
+
+        s3_bucket = get_config("AWS_S3_BUCKET_NAME")
+        iam_role = get_config("REDSHIFT_IAM_ROLE_ARN")
+        schema = get_config("REDSHIFT_SCHEMA_BRONZE", "nba_bronze")
+        s3_prefix = combined_result["redshift_s3_prefix"]
+
+        sync.create_redshift_schemas_and_tables()
+
+        tables = [
+            {"name": "raw_game_logs", "keys": ["player_id", "game_date", "matchup"]},
+            {"name": "raw_schedule", "keys": ["schedule_date", "team_abbr", "opponent_abbr"]},
+        ]
+        for tbl in tables:
+            sync.load_s3_to_redshift(
+                s3_bucket, f"{s3_prefix}/{tbl['name']}/",
+                schema, tbl["name"], iam_role,
+            )
+            sync.merge_redshift_staging(schema, tbl["name"], tbl["keys"])
+            sync.run_redshift_dq_checks(schema, tbl["name"], tbl["keys"])
+
+        combined_result["redshift_load_status"] = "success"
+        return combined_result
+
+    @task(retries=1, retry_delay=timedelta(minutes=5))
+    def dbt_build_redshift(combined_result: dict) -> dict:
+        """Run dbt build targeting Redshift."""
+        repo_root = get_dbt_repo_root()
+        profiles_dir = repo_root / "dbt" / "profiles"
+        command = [
+            "dbt",
+            "build",
+            "--project-dir",
+            str(repo_root),
+            "--profiles-dir",
+            str(profiles_dir),
+            "--target",
+            "redshift",
+            "--exclude",
+            "analysis_snapshot_latest",
+            "source:gold_runtime.analysis_snapshots",
+            "path:dbt/tests/no_duplicate_analysis_snapshots.sql",
+        ]
+
+        env = os.environ.copy()
+        env.setdefault("BQ_PROJECT", get_project_id())
+        env.setdefault("NBA_SEASON", SUPPORTED_SEASON)
+        subprocess.run(command, cwd=repo_root, env=env, check=True)
+        combined_result["redshift_dbt_status"] = "success"
+        return combined_result
+
+    @task(retries=0)
+    def skip_redshift_sync(combined_result: dict) -> dict:
+        """No-op when Redshift sync is disabled."""
+        logger.info("Redshift sync is disabled, skipping")
+        combined_result["redshift_status"] = "skipped"
+        return combined_result
+
     combined = combine_pipeline_results(merged, merged_schedule)
+
+    # Redshift branch (optional, non-blocking)
+    redshift_check = check_redshift_enabled(combined)
+    redshift_exported = export_bigquery_bronze(combined)
+    redshift_s3 = sync_to_s3(redshift_exported)
+    redshift_loaded = load_redshift_bronze(redshift_s3)
+    redshift_modeled = dbt_build_redshift(redshift_loaded)
+    redshift_skipped = skip_redshift_sync(combined)
+
+    redshift_check >> [redshift_exported, redshift_skipped]
+
+    # Main pipeline continues regardless of Redshift outcome
     modeled = dbt_build(combined)
     snapshotted = build_analysis_snapshot(modeled)
     publish_run_metrics(snapshotted)

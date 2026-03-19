@@ -5,6 +5,7 @@ config-version: 2
 profile: nba_warehouse
 
 model-paths: ["dbt/models"]
+macro-paths: ["dbt/macros"]
 test-paths: ["dbt/tests"]
 
 models:

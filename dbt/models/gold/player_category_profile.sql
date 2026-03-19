@@ -55,21 +55,21 @@ select
     p.avg_tov,
     p.avg_min,
     p.avg_fantasy_points_simple,
-    round(safe_divide(p.avg_pts - b.league_avg_pts, nullif(b.league_sd_pts, 0)), 2) as z_pts,
-    round(safe_divide(p.avg_reb - b.league_avg_reb, nullif(b.league_sd_reb, 0)), 2) as z_reb,
-    round(safe_divide(p.avg_ast - b.league_avg_ast, nullif(b.league_sd_ast, 0)), 2) as z_ast,
-    round(safe_divide(p.avg_stl - b.league_avg_stl, nullif(b.league_sd_stl, 0)), 2) as z_stl,
-    round(safe_divide(p.avg_blk - b.league_avg_blk, nullif(b.league_sd_blk, 0)), 2) as z_blk,
-    round(-safe_divide(p.avg_tov - b.league_avg_tov, nullif(b.league_sd_tov, 0)), 2) as z_tov,
-    round(safe_divide(p.avg_min - b.league_avg_min, nullif(b.league_sd_min, 0)), 2) as z_min,
-    round(safe_divide(p.avg_fantasy_points_simple - b.league_avg_fantasy_points_simple, nullif(b.league_sd_fantasy_points_simple, 0)), 2) as z_fantasy_points_simple,
+    round({{ safe_divide('p.avg_pts - b.league_avg_pts', 'nullif(b.league_sd_pts, 0)') }}, 2) as z_pts,
+    round({{ safe_divide('p.avg_reb - b.league_avg_reb', 'nullif(b.league_sd_reb, 0)') }}, 2) as z_reb,
+    round({{ safe_divide('p.avg_ast - b.league_avg_ast', 'nullif(b.league_sd_ast, 0)') }}, 2) as z_ast,
+    round({{ safe_divide('p.avg_stl - b.league_avg_stl', 'nullif(b.league_sd_stl, 0)') }}, 2) as z_stl,
+    round({{ safe_divide('p.avg_blk - b.league_avg_blk', 'nullif(b.league_sd_blk, 0)') }}, 2) as z_blk,
+    round(-{{ safe_divide('p.avg_tov - b.league_avg_tov', 'nullif(b.league_sd_tov, 0)') }}, 2) as z_tov,
+    round({{ safe_divide('p.avg_min - b.league_avg_min', 'nullif(b.league_sd_min, 0)') }}, 2) as z_min,
+    round({{ safe_divide('p.avg_fantasy_points_simple - b.league_avg_fantasy_points_simple', 'nullif(b.league_sd_fantasy_points_simple, 0)') }}, 2) as z_fantasy_points_simple,
     round(
-        coalesce(safe_divide(p.avg_pts - b.league_avg_pts, nullif(b.league_sd_pts, 0)), 0)
-        + coalesce(safe_divide(p.avg_reb - b.league_avg_reb, nullif(b.league_sd_reb, 0)), 0)
-        + coalesce(safe_divide(p.avg_ast - b.league_avg_ast, nullif(b.league_sd_ast, 0)), 0)
-        + coalesce(safe_divide(p.avg_stl - b.league_avg_stl, nullif(b.league_sd_stl, 0)), 0)
-        + coalesce(safe_divide(p.avg_blk - b.league_avg_blk, nullif(b.league_sd_blk, 0)), 0)
-        - coalesce(safe_divide(p.avg_tov - b.league_avg_tov, nullif(b.league_sd_tov, 0)), 0),
+        coalesce({{ safe_divide('p.avg_pts - b.league_avg_pts', 'nullif(b.league_sd_pts, 0)') }}, 0)
+        + coalesce({{ safe_divide('p.avg_reb - b.league_avg_reb', 'nullif(b.league_sd_reb, 0)') }}, 0)
+        + coalesce({{ safe_divide('p.avg_ast - b.league_avg_ast', 'nullif(b.league_sd_ast, 0)') }}, 0)
+        + coalesce({{ safe_divide('p.avg_stl - b.league_avg_stl', 'nullif(b.league_sd_stl, 0)') }}, 0)
+        + coalesce({{ safe_divide('p.avg_blk - b.league_avg_blk', 'nullif(b.league_sd_blk, 0)') }}, 0)
+        - coalesce({{ safe_divide('p.avg_tov - b.league_avg_tov', 'nullif(b.league_sd_tov, 0)') }}, 0),
         2
     ) as category_score_6cat,
     6 as available_category_count,
