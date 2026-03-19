@@ -30,9 +30,9 @@ rolled as (
         any_value(insight_type) as insight_type,
         any_value(as_of_date) as as_of_date,
         any_value(priority_score) as priority_score,
-        countif(future_game_num <= 3) as next_3_games_sample,
+        {{ countif('future_game_num <= 3') }} as next_3_games_sample,
         round(avg(case when future_game_num <= 3 then fantasy_points_simple end), 1) as avg_fantasy_points_next_3_games,
-        countif(future_game_num <= 7) as next_7_games_sample,
+        {{ countif('future_game_num <= 7') }} as next_7_games_sample,
         round(avg(case when future_game_num <= 7 then fantasy_points_simple end), 1) as avg_fantasy_points_next_7_games
     from future_games
     group by 1, 2

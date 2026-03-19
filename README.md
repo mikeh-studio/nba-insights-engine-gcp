@@ -31,6 +31,18 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 8. Build a deterministic `gold.analysis_snapshots` record from leaderboard, trend, ranking, and recommendation outputs.
 9. Publish watermark and run metadata to `nba_metadata`.
 
+## Optional Redshift Secondary Warehouse
+
+The pipeline optionally syncs bronze tables to an AWS Redshift Serverless cluster as a secondary warehouse. This is a cross-cloud learning/portfolio feature and is not required for the primary BigQuery pipeline.
+
+**How to enable:** Set `ENABLE_REDSHIFT=true` in your environment. When enabled, the Airflow DAG appends a Redshift sync task after the BigQuery bronze merge.
+
+**Data flow:** BigQuery bronze tables are exported as Parquet to GCS, copied to S3, and loaded into Redshift via `COPY`. dbt models then run against the Redshift target using cross-database compatibility macros.
+
+**Infrastructure:** AWS resources (Redshift Serverless, S3 bucket, IAM roles, networking) are managed by Terraform in `infra/terraform-aws/`.
+
+**Configuration:** See `.env.example` for the full set of Redshift-related environment variables (`REDSHIFT_HOST`, `REDSHIFT_DB`, `AWS_S3_BUCKET_NAME`, etc.).
+
 ## Warehouse Layout
 
 - `bronze.raw_game_logs`: replay-safe raw source table
@@ -52,6 +64,8 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 - `gold.analysis_snapshots`: deterministic narrative snapshot output written by the DAG
 
 dbt is intentionally centered on `2025-26` only. The silver layer filters to that season and the accepted in-season date window.
+
+When Redshift sync is enabled, bronze tables are also available in Redshift under the configured schema (default `nba_bronze`).
 
 ## Public Service
 
@@ -113,6 +127,7 @@ API_FRESHNESS_THRESHOLD_HOURS=36
 API_MAX_SEARCH_RESULTS=12
 PORT=8080
 AIRFLOW_HOME=./airflow_home
+ENABLE_REDSHIFT=false
 ```
 
 Notes:
@@ -194,6 +209,12 @@ dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
 Additional checks when validating Airflow changes:
 
 - DAG import/parse in the local Airflow environment
+
+When validating Redshift cross-db compatibility:
+
+```bash
+dbt parse --project-dir . --profiles-dir dbt/profiles --target redshift
+```
 
 Current local validation caveats:
 
