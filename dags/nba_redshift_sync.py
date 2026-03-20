@@ -115,14 +115,6 @@ CREATE TABLE IF NOT EXISTS {schema}.raw_game_logs (
     matchup         VARCHAR(50),
     wl              VARCHAR(2),
     min             DOUBLE PRECISION,
-    fgm             DOUBLE PRECISION,
-    fga             DOUBLE PRECISION,
-    fg_pct          DOUBLE PRECISION,
-    ftm             DOUBLE PRECISION,
-    fta             DOUBLE PRECISION,
-    ft_pct          DOUBLE PRECISION,
-    fg3m            DOUBLE PRECISION,
-    fg3a            DOUBLE PRECISION,
     pts             BIGINT,
     reb             BIGINT,
     ast             BIGINT,
@@ -130,9 +122,9 @@ CREATE TABLE IF NOT EXISTS {schema}.raw_game_logs (
     blk             BIGINT,
     tov             BIGINT,
     season          VARCHAR(10),
+    ingested_at_utc TIMESTAMP,
     player_id       BIGINT,
-    player_name     VARCHAR(200),
-    ingested_at_utc TIMESTAMP
+    player_name     VARCHAR(200)
 )
 DISTSTYLE KEY
 DISTKEY (player_id)
@@ -352,6 +344,18 @@ def sync_bronze_to_redshift(
     results = {}
     for tbl in tables:
         table_name = tbl["name"]
+
+        # Skip tables that don't exist yet in BigQuery
+        from google.cloud import bigquery as bq
+
+        try:
+            bq.Client(project=project_id).get_table(
+                f"{project_id}.{bronze_dataset}.{table_name}"
+            )
+        except Exception:
+            logger.warning("BQ table %s.%s not found, skipping", bronze_dataset, table_name)
+            results[table_name] = {"skipped": True, "reason": "BQ table not found"}
+            continue
 
         export_bq_to_gcs_parquet(
             project_id, bronze_dataset, table_name, gcs_bucket, gcs_prefix,
