@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import contextmanager
+from typing import Iterable
 
 logger = logging.getLogger("nba_redshift_sync")
 
@@ -16,6 +17,7 @@ logger = logging.getLogger("nba_redshift_sync")
 # ---------------------------------------------------------------------------
 # Connection helpers
 # ---------------------------------------------------------------------------
+
 
 def _get_env(key: str, default: str | None = None) -> str:
     """Read an environment variable with optional default."""
@@ -47,6 +49,7 @@ def get_redshift_connection():
 # BQ -> GCS export
 # ---------------------------------------------------------------------------
 
+
 def export_bq_to_gcs_parquet(
     project_id: str,
     dataset: str,
@@ -64,7 +67,9 @@ def export_bq_to_gcs_parquet(
     job_config = bq.ExtractJobConfig(
         destination_format=bq.DestinationFormat.PARQUET,
     )
-    extract_job = client.extract_table(source_ref, destination_uri, job_config=job_config)
+    extract_job = client.extract_table(
+        source_ref, destination_uri, job_config=job_config
+    )
     extract_job.result()  # wait for completion
     logger.info("Exported %s to %s", source_ref, destination_uri)
     return f"gs://{gcs_bucket}/{gcs_prefix}/{table}/"
@@ -73,6 +78,7 @@ def export_bq_to_gcs_parquet(
 # ---------------------------------------------------------------------------
 # GCS -> S3 copy
 # ---------------------------------------------------------------------------
+
 
 def copy_gcs_to_s3(
     gcs_bucket: str,
@@ -92,12 +98,14 @@ def copy_gcs_to_s3(
     for blob in blobs:
         if blob.name.endswith("/"):
             continue
-        relative = blob.name[len(gcs_prefix):].lstrip("/")
+        relative = blob.name[len(gcs_prefix) :].lstrip("/")
         s3_key = f"{s3_prefix}/{relative}"
         content = blob.download_as_bytes()
         s3_client.put_object(Bucket=s3_bucket, Key=s3_key, Body=content)
         copied += 1
-        logger.info("Copied gs://%s/%s -> s3://%s/%s", gcs_bucket, blob.name, s3_bucket, s3_key)
+        logger.info(
+            "Copied gs://%s/%s -> s3://%s/%s", gcs_bucket, blob.name, s3_bucket, s3_key
+        )
 
     logger.info("Copied %d files from GCS to S3", copied)
     return copied
@@ -109,40 +117,125 @@ def copy_gcs_to_s3(
 
 _SCHEMAS = ["nba_bronze", "nba_silver", "nba_gold"]
 
-_RAW_GAME_LOGS_DDL = """
-CREATE TABLE IF NOT EXISTS {schema}.raw_game_logs (
-    game_date       DATE,
-    matchup         VARCHAR(50),
-    wl              VARCHAR(2),
-    min             DOUBLE PRECISION,
-    pts             BIGINT,
-    reb             BIGINT,
-    ast             BIGINT,
-    stl             BIGINT,
-    blk             BIGINT,
-    tov             BIGINT,
-    season          VARCHAR(10),
-    ingested_at_utc TIMESTAMP,
-    player_id       BIGINT,
-    player_name     VARCHAR(200)
-)
-DISTSTYLE KEY
-DISTKEY (player_id)
-SORTKEY (game_date, player_id);
-"""
+_RAW_TABLE_SPECS = {
+    "raw_game_logs": {
+        "columns": [
+            ("game_date", "DATE"),
+            ("matchup", "VARCHAR(50)"),
+            ("wl", "VARCHAR(2)"),
+            ("min", "DOUBLE PRECISION"),
+            ("fgm", "DOUBLE PRECISION"),
+            ("fga", "DOUBLE PRECISION"),
+            ("fg_pct", "DOUBLE PRECISION"),
+            ("fg3m", "DOUBLE PRECISION"),
+            ("fg3a", "DOUBLE PRECISION"),
+            ("fg3_pct", "DOUBLE PRECISION"),
+            ("ftm", "DOUBLE PRECISION"),
+            ("fta", "DOUBLE PRECISION"),
+            ("ft_pct", "DOUBLE PRECISION"),
+            ("oreb", "DOUBLE PRECISION"),
+            ("dreb", "DOUBLE PRECISION"),
+            ("pts", "BIGINT"),
+            ("reb", "BIGINT"),
+            ("ast", "BIGINT"),
+            ("stl", "BIGINT"),
+            ("blk", "BIGINT"),
+            ("tov", "BIGINT"),
+            ("pf", "BIGINT"),
+            ("plus_minus", "DOUBLE PRECISION"),
+            ("season", "VARCHAR(10)"),
+            ("ingested_at_utc", "TIMESTAMP"),
+            ("player_id", "BIGINT"),
+            ("player_name", "VARCHAR(200)"),
+        ],
+        "diststyle": "KEY",
+        "distkey": "player_id",
+        "sortkey": ["game_date", "player_id"],
+    },
+    "raw_schedule": {
+        "columns": [
+            ("schedule_date", "DATE"),
+            ("game_id", "VARCHAR(20)"),
+            ("season", "VARCHAR(10)"),
+            ("team_abbr", "VARCHAR(10)"),
+            ("opponent_abbr", "VARCHAR(10)"),
+            ("home_away", "VARCHAR(10)"),
+            ("is_back_to_back", "BOOLEAN"),
+            ("game_status", "VARCHAR(20)"),
+            ("source_updated_at_utc", "TIMESTAMP"),
+            ("ingested_at_utc", "TIMESTAMP"),
+        ],
+        "diststyle": "EVEN",
+        "sortkey": ["schedule_date", "team_abbr"],
+    },
+}
 
-_RAW_SCHEDULE_DDL = """
-CREATE TABLE IF NOT EXISTS {schema}.raw_schedule (
-    schedule_date   DATE,
-    team_abbr       VARCHAR(10),
-    opponent_abbr   VARCHAR(10),
-    home_away       VARCHAR(10),
-    season          VARCHAR(10),
-    ingested_at_utc TIMESTAMP
+
+def _get_table_spec(table_name: str) -> dict:
+    try:
+        return _RAW_TABLE_SPECS[table_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported Redshift raw table: {table_name}") from exc
+
+
+def get_raw_table_column_names(table_name: str) -> list[str]:
+    """Return ordered Redshift column names for a raw table."""
+    return [name for name, _ in _get_table_spec(table_name)["columns"]]
+
+
+def _build_create_table_ddl(
+    relation_name: str,
+    table_name: str,
+    *,
+    create_if_not_exists: bool = True,
+) -> str:
+    spec = _get_table_spec(table_name)
+    columns_sql = ",\n".join(
+        f"    {column_name:<21} {column_type}"
+        for column_name, column_type in spec["columns"]
+    )
+    create_qualifier = "IF NOT EXISTS " if create_if_not_exists else ""
+    ddl = f"""
+CREATE TABLE {create_qualifier}{relation_name} (
+{columns_sql}
 )
-DISTSTYLE EVEN
-SORTKEY (schedule_date, team_abbr);
+DISTSTYLE {spec["diststyle"]}
 """
+    if spec.get("distkey"):
+        ddl += f"DISTKEY ({spec['distkey']})\n"
+    ddl += f"SORTKEY ({', '.join(spec['sortkey'])});"
+    return ddl
+
+
+def _get_existing_columns(cur, schema_name: str, table_name: str) -> list[str]:
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s
+          AND table_name = %s
+        ORDER BY ordinal_position
+        """,
+        (schema_name, table_name),
+    )
+    return [row[0] for row in cur.fetchall()]
+
+
+def _build_add_missing_column_ddls(
+    schema_name: str,
+    table_name: str,
+    existing_columns: Iterable[str],
+) -> list[str]:
+    existing = set(existing_columns)
+    statements = []
+    for column_name, column_type in _get_table_spec(table_name)["columns"]:
+        if column_name in existing:
+            continue
+        statements.append(
+            f"ALTER TABLE {schema_name}.{table_name} "
+            f"ADD COLUMN {column_name} {column_type};"
+        )
+    return statements
 
 
 def create_redshift_schemas_and_tables():
@@ -154,8 +247,15 @@ def create_redshift_schemas_and_tables():
             for schema in _SCHEMAS:
                 cur.execute(f"CREATE SCHEMA IF NOT EXISTS {schema};")
 
-            cur.execute(_RAW_GAME_LOGS_DDL.format(schema=bronze_schema))
-            cur.execute(_RAW_SCHEDULE_DDL.format(schema=bronze_schema))
+            for table_name in _RAW_TABLE_SPECS:
+                cur.execute(
+                    _build_create_table_ddl(f"{bronze_schema}.{table_name}", table_name)
+                )
+                existing_columns = _get_existing_columns(cur, bronze_schema, table_name)
+                for statement in _build_add_missing_column_ddls(
+                    bronze_schema, table_name, existing_columns
+                ):
+                    cur.execute(statement)
 
         conn.commit()
     logger.info("Redshift schemas and tables ensured")
@@ -164,6 +264,7 @@ def create_redshift_schemas_and_tables():
 # ---------------------------------------------------------------------------
 # S3 -> Redshift COPY
 # ---------------------------------------------------------------------------
+
 
 def load_s3_to_redshift(
     s3_bucket: str,
@@ -180,7 +281,11 @@ def load_s3_to_redshift(
             # Create staging table like the target
             cur.execute(f"DROP TABLE IF EXISTS {staging_table};")
             cur.execute(
-                f"CREATE TABLE {staging_table} (LIKE {redshift_schema}.{redshift_table});"
+                _build_create_table_ddl(
+                    staging_table,
+                    redshift_table,
+                    create_if_not_exists=False,
+                )
             )
 
             copy_sql = f"""
@@ -198,7 +303,10 @@ def load_s3_to_redshift(
 
     logger.info(
         "Loaded %d rows into %s from s3://%s/%s",
-        row_count, staging_table, s3_bucket, s3_prefix,
+        row_count,
+        staging_table,
+        s3_bucket,
+        s3_prefix,
     )
     return row_count
 
@@ -206,6 +314,7 @@ def load_s3_to_redshift(
 # ---------------------------------------------------------------------------
 # Redshift merge (DELETE + INSERT pattern)
 # ---------------------------------------------------------------------------
+
 
 def merge_redshift_staging(
     redshift_schema: str,
@@ -218,9 +327,9 @@ def merge_redshift_staging(
     """
     staging = f"{redshift_schema}.stg_{table_name}"
     target = f"{redshift_schema}.{table_name}"
-    join_clause = " AND ".join(
-        f"{target}.{k} = {staging}.{k}" for k in business_keys
-    )
+    ordered_columns = get_raw_table_column_names(table_name)
+    ordered_column_list = ", ".join(ordered_columns)
+    join_clause = " AND ".join(f"{target}.{k} = {staging}.{k}" for k in business_keys)
 
     with get_redshift_connection() as conn:
         with conn.cursor() as cur:
@@ -237,8 +346,9 @@ def merge_redshift_staging(
             cur.execute(delete_sql)
 
             insert_sql = f"""
-                INSERT INTO {target}
-                SELECT * FROM {staging};
+                INSERT INTO {target} ({ordered_column_list})
+                SELECT {ordered_column_list}
+                FROM {staging};
             """
             cur.execute(insert_sql)
 
@@ -250,7 +360,8 @@ def merge_redshift_staging(
 
     logger.info(
         "Merged %d staging rows into %s",
-        staging_count, target,
+        staging_count,
+        target,
     )
     return {"table": target, "rows_merged": staging_count}
 
@@ -258,6 +369,7 @@ def merge_redshift_staging(
 # ---------------------------------------------------------------------------
 # Redshift DQ checks (mirrors BQ pipeline checks)
 # ---------------------------------------------------------------------------
+
 
 def run_redshift_dq_checks(
     redshift_schema: str,
@@ -279,9 +391,7 @@ def run_redshift_dq_checks(
 
             # Null business key checks
             for key in business_keys:
-                cur.execute(
-                    f"SELECT COUNT(*) FROM {full_table} WHERE {key} IS NULL;"
-                )
+                cur.execute(f"SELECT COUNT(*) FROM {full_table} WHERE {key} IS NULL;")
                 null_count = cur.fetchone()[0]
                 results[f"null_{key}"] = null_count
                 if null_count > 0:
@@ -291,13 +401,15 @@ def run_redshift_dq_checks(
 
             # Duplicate business key check
             key_cols = ", ".join(business_keys)
-            cur.execute(f"""
+            cur.execute(
+                f"""
                 SELECT {key_cols}, COUNT(*) AS cnt
                 FROM {full_table}
                 GROUP BY {key_cols}
                 HAVING COUNT(*) > 1
                 LIMIT 5;
-            """)
+            """
+            )
             dupes = cur.fetchall()
             results["duplicate_keys"] = len(dupes)
             if dupes:
@@ -312,6 +424,7 @@ def run_redshift_dq_checks(
 # ---------------------------------------------------------------------------
 # Orchestration helpers (called from the DAG)
 # ---------------------------------------------------------------------------
+
 
 def sync_bronze_to_redshift(
     project_id: str,
@@ -353,30 +466,45 @@ def sync_bronze_to_redshift(
                 f"{project_id}.{bronze_dataset}.{table_name}"
             )
         except Exception:
-            logger.warning("BQ table %s.%s not found, skipping", bronze_dataset, table_name)
+            logger.warning(
+                "BQ table %s.%s not found, skipping", bronze_dataset, table_name
+            )
             results[table_name] = {"skipped": True, "reason": "BQ table not found"}
             continue
 
         export_bq_to_gcs_parquet(
-            project_id, bronze_dataset, table_name, gcs_bucket, gcs_prefix,
+            project_id,
+            bronze_dataset,
+            table_name,
+            gcs_bucket,
+            gcs_prefix,
         )
 
         copy_gcs_to_s3(
-            gcs_bucket, f"{gcs_prefix}/{table_name}/",
-            s3_bucket, f"{s3_prefix}/{table_name}",
+            gcs_bucket,
+            f"{gcs_prefix}/{table_name}/",
+            s3_bucket,
+            f"{s3_prefix}/{table_name}",
         )
 
         load_s3_to_redshift(
-            s3_bucket, f"{s3_prefix}/{table_name}/",
-            redshift_schema_bronze, table_name, iam_role_arn,
+            s3_bucket,
+            f"{s3_prefix}/{table_name}/",
+            redshift_schema_bronze,
+            table_name,
+            iam_role_arn,
         )
 
         merge_result = merge_redshift_staging(
-            redshift_schema_bronze, table_name, tbl["business_keys"],
+            redshift_schema_bronze,
+            table_name,
+            tbl["business_keys"],
         )
 
         dq_result = run_redshift_dq_checks(
-            redshift_schema_bronze, table_name, tbl["business_keys"],
+            redshift_schema_bronze,
+            table_name,
+            tbl["business_keys"],
         )
 
         results[table_name] = {**merge_result, "dq": dq_result}
