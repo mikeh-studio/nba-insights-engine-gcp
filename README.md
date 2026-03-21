@@ -43,11 +43,13 @@ The pipeline optionally syncs bronze tables to an AWS Redshift Serverless cluste
 
 **How to enable:** Set `ENABLE_REDSHIFT=true` in your environment. When enabled, the Airflow DAG appends a Redshift sync task after the BigQuery bronze merge.
 
-**Data flow:** BigQuery bronze tables are exported as Parquet to GCS, copied to S3, and loaded into Redshift via `COPY`. dbt models then run against the Redshift target using cross-database compatibility macros.
+**Data flow:** BigQuery bronze tables are exported as Parquet to GCS, copied to S3, and loaded into Redshift via `COPY`. The Redshift sync ensures the bronze table schemas match the BigQuery source contract and adds any missing columns in place before loading. dbt models then run against the Redshift target using cross-database compatibility macros.
 
 **Infrastructure:** AWS resources (Redshift Serverless, S3 bucket, IAM roles, networking) are managed by Terraform in `infra/terraform-aws/`.
 
 **Configuration:** See `.env.example` for the full set of Redshift-related environment variables (`REDSHIFT_HOST`, `REDSHIFT_DB`, `AWS_S3_BUCKET_NAME`, etc.).
+
+**Local dependency note:** Redshift validation requires the `dbt-redshift` adapter in the active Python environment in addition to the base `dbt-core` install.
 
 ## Warehouse Layout
 
@@ -220,11 +222,13 @@ When validating Redshift cross-db compatibility:
 
 ```bash
 dbt parse --project-dir . --profiles-dir dbt/profiles --target redshift
+dbt build --project-dir . --profiles-dir dbt/profiles --target redshift --select path:dbt/models/silver
 ```
 
 Current local validation caveats:
 
 - `dbt parse` runs locally without warehouse access.
+- `dbt build --target redshift --select path:dbt/models/silver` is the recommended compatibility check for the Redshift secondary warehouse and requires working Redshift credentials plus the `dbt-redshift` adapter.
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - Airflow parse checks require the Airflow CLI/module to be installed in the active environment.
 

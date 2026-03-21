@@ -25,11 +25,11 @@ select
     season,
     player_id,
     player_name,
-    upper(regexp_extract(matchup, r'^([A-Z]{2,3})')) as team_abbr,
-    upper(regexp_extract(matchup, r'(?:vs\.|@)\s+([A-Z]{2,3})')) as opponent_abbr,
+    upper({{ regex_extract('matchup', "'^([A-Z]{2,3})'") }}) as team_abbr,
+    upper({{ regex_extract('matchup', "'([A-Z]{2,3})$'") }}) as opponent_abbr,
     case
-        when regexp_contains(matchup, r'@') then 'AWAY'
-        when regexp_contains(matchup, r'vs\.') then 'HOME'
+        when {{ regex_contains('matchup', "'@'") }} then 'AWAY'
+        when {{ regex_contains('matchup', "'vs\\\\.'") }} then 'HOME'
         else 'UNKNOWN'
     end as home_away,
     ingested_at_utc

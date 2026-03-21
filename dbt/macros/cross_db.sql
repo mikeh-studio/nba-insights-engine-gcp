@@ -53,3 +53,21 @@
     double precision
   {% endif %}
 {% endmacro %}
+
+
+{% macro regex_extract(expression, pattern) %}
+  {% if target.type == 'bigquery' %}
+    regexp_extract({{ expression }}, {{ pattern }})
+  {% else %}
+    regexp_substr({{ expression }}, {{ pattern }}, 1, 1, 'e')
+  {% endif %}
+{% endmacro %}
+
+
+{% macro regex_contains(expression, pattern) %}
+  {% if target.type == 'bigquery' %}
+    regexp_contains({{ expression }}, {{ pattern }})
+  {% else %}
+    regexp_instr({{ expression }}, {{ pattern }}) > 0
+  {% endif %}
+{% endmacro %}
