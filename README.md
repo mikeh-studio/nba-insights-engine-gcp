@@ -18,6 +18,7 @@ Core decisions for this version:
 - Self-hosted Airflow is the supported orchestration path.
 - Cloud Run is the public read-only website/API target.
 - Infrastructure is managed by Terraform — GCP core infra and AWS Redshift infra (`infra/terraform-aws/`).
+- GitHub Actions CI validates `pytest`, `dbt parse`, and Terraform on pull requests and pushes to `main`.
 - The operational scope is fixed to season `2025-26`.
 - Claude/Anthropic is not part of the v1 runtime path.
 - Analysis output is deterministic and template-based, not LLM-generated.
@@ -141,11 +142,11 @@ ENABLE_REDSHIFT=false
 Notes:
 
 - `gcloud` authentication is assumed during rollout or local warehouse validation.
-- The production season is fixed to `2025-26`; do not treat the notebook as the production contract.
+- The production season is fixed to `2025-26`; do not treat the archived notebook in `notebooks/nba_api.ipynb` as the production contract.
 - Airflow is intended to run locally or on a self-hosted machine for orchestration.
 - The DAG reads Airflow Variables first and falls back to environment variables for local runs.
 - Keep local secrets in ignored env files only; do not commit `.env*` files or ad hoc variants such as `.env `.
-- The notebook may remain useful for exploration, but Anthropic/Claude is not part of the production contract.
+- The exploratory notebooks under `notebooks/` may remain useful for reference, but Anthropic/Claude is not part of the production contract.
 
 ## Running Airflow Locally
 

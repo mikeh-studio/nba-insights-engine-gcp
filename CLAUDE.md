@@ -17,7 +17,7 @@ The target direction is:
 
 **Current state**
 
-- The repository contains a notebook entrypoint in `nba_api.ipynb`.
+- The repository keeps an archived exploratory notebook in `notebooks/nba_api.ipynb`.
 - Airflow orchestration lives in `dags/nba_analytics_dag.py`.
 - Shared business logic lives in `dags/nba_pipeline.py`.
 - The current flow is mostly Python-task driven and still reflects its notebook origin.
@@ -133,7 +133,7 @@ Primary tools for this repository:
 Optional supporting tools:
 
 - Google Workspace CLI for creating or updating Docs/Sheets-based handoff artifacts, reports, or collaboration outputs
-- Anthropic/Claude tooling for optional downstream article generation
+- Anthropic/Claude tooling for optional downstream article generation outside the v1 runtime path
 
 Google Workspace CLI is auxiliary only. It should not become a required runtime dependency for the core pipeline.
 
@@ -164,7 +164,7 @@ Current local commands:
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-jupyter notebook nba_api.ipynb
+jupyter notebook notebooks/nba_api.ipynb
 
 source .venv-airflow/bin/activate
 export AIRFLOW_HOME=$(pwd)/airflow_home

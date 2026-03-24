@@ -17,7 +17,7 @@ The intended end state is:
 
 ## Current Implementation Snapshot
 
-- Notebook workflow exists in `nba_api.ipynb`.
+- Exploratory notebook workflow is archived under `notebooks/nba_api.ipynb`.
 - Airflow DAG logic lives under `dags/`.
 - Shared pipeline functions live in `dags/nba_pipeline.py`.
 - Optional Redshift sync logic lives in `dags/nba_redshift_sync.py`.
@@ -120,7 +120,7 @@ Primary tools:
 Optional supporting tools:
 
 - Google Workspace CLI for Docs/Sheets-based handoffs, report exports, analyst collaboration artifacts, or operational runbooks
-- Claude/Anthropic tooling for optional narrative outputs after warehouse results exist
+- Claude/Anthropic tooling for optional downstream narrative experiments after curated warehouse outputs exist; it is not part of the v1 runtime path
 
 Google Workspace CLI is optional. Do not make core pipeline execution depend on it.
 
