@@ -40,17 +40,9 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 
 ## Optional Redshift Secondary Warehouse
 
-The pipeline optionally syncs bronze tables to an AWS Redshift Serverless cluster as a secondary warehouse. This is a cross-cloud learning/portfolio feature and is not required for the primary BigQuery pipeline.
+The pipeline optionally syncs bronze tables to AWS Redshift Serverless as a secondary warehouse (cross-cloud learning/portfolio feature). Set `ENABLE_REDSHIFT=true` to enable — the DAG appends a Redshift sync task after the BigQuery bronze merge.
 
-**How to enable:** Set `ENABLE_REDSHIFT=true` in your environment. When enabled, the Airflow DAG appends a Redshift sync task after the BigQuery bronze merge.
-
-**Data flow:** BigQuery bronze tables are exported as Parquet to GCS, copied to S3, and loaded into Redshift via `COPY`. The Redshift sync ensures the bronze table schemas match the BigQuery source contract and adds any missing columns in place before loading. dbt models then run against the Redshift target using cross-database compatibility macros.
-
-**Infrastructure:** AWS resources (Redshift Serverless, S3 bucket, IAM roles, networking) are managed by Terraform in `infra/terraform-aws/`.
-
-**Configuration:** See `.env.example` for the full set of Redshift-related environment variables (`REDSHIFT_HOST`, `REDSHIFT_DB`, `AWS_S3_BUCKET_NAME`, etc.).
-
-**Local dependency note:** Redshift validation requires the `dbt-redshift` adapter in the active Python environment in addition to the base `dbt-core` install.
+Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Redshift via `COPY` with automatic schema alignment. dbt models run against Redshift using cross-database compatibility macros. AWS infrastructure is managed by Terraform in `infra/terraform-aws/`. See `.env.example` for Redshift-related variables. The `dbt-redshift` adapter is required for local Redshift validation.
 
 ## Warehouse Layout
 
@@ -139,15 +131,6 @@ AIRFLOW_HOME=./airflow_home
 ENABLE_REDSHIFT=false
 ```
 
-Notes:
-
-- `gcloud` authentication is assumed during rollout or local warehouse validation.
-- The production season is fixed to `2025-26`; do not treat the archived notebook in `notebooks/nba_api.ipynb` as the production contract.
-- Airflow is intended to run locally or on a self-hosted machine for orchestration.
-- The DAG reads Airflow Variables first and falls back to environment variables for local runs.
-- Keep local secrets in ignored env files only; do not commit `.env*` files or ad hoc variants such as `.env `.
-- The exploratory notebooks under `notebooks/` may remain useful for reference, but Anthropic/Claude is not part of the production contract.
-
 ## Running Airflow Locally
 
 This repo supports a host-based Airflow workflow without Docker. The included `Makefile`
@@ -188,18 +171,11 @@ Useful URLs and commands:
 
 ## Running the App Locally
 
-Run the FastAPI service with:
-
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
 
-Then open:
-
-- `http://localhost:8080/`
-- `http://localhost:8080/analysis`
-- `http://localhost:8080/recommendations`
-- `http://localhost:8080/api/health`
+The service is available at `http://localhost:8080`. See **Public Service** above for available routes.
 
 ## QA Expectations
 
@@ -232,22 +208,6 @@ Current local validation caveats:
 - `dbt build --target redshift --select path:dbt/models/silver` is the recommended compatibility check for the Redshift secondary warehouse and requires working Redshift credentials plus the `dbt-redshift` adapter.
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - Airflow parse checks require the Airflow CLI/module to be installed in the active environment.
-
-Areas covered by tests should include:
-
-- watermark + replay logic
-- schedule-context normalization and DQ
-- season-only filtering for `2025-26`
-- run metadata record generation
-- deterministic analysis snapshot generation with fantasy recommendations
-- DAG import
-- API smoke coverage for all public routes
-
-## Runtime Notes
-
-- Local or self-hosted Airflow runs the DAG and needs access to GCS, BigQuery, and the dbt profile configuration.
-- Cloud Run serves the FastAPI app and needs read access to `nba_gold` and `nba_metadata`.
-- Terraform is intentionally not required for this v1 implementation pass.
 
 ## Security Hygiene
 
