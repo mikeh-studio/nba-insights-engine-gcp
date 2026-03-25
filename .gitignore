@@ -13,12 +13,22 @@ __pycache__/
 # Local dbt state
 dbt/profiles/.user.yml
 dbt_packages/
-.terraform/
 target/
+
+# Terraform
+.terraform/
+*.tfvars
+*.tfstate
+*.tfstate.backup
+infra/terraform-aws/env/
 
 # Notebook and editor artifacts
 nba_api_executed.ipynb
 .ipynb_checkpoints/
+
+# Linter/type-checker caches
+.mypy_cache/
+.ruff_cache/
 
 # Airflow local development
 airflow_home/
@@ -26,3 +36,6 @@ airflow.cfg
 airflow.db
 webserver_config.py
 logs/
+
+# One-off artifacts
+reports/
