@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository guidance for coding agents. For complete project context, see `CLAUDE.md`.
+Repository guidance for coding agents.
 
 ## Repository Purpose
 
