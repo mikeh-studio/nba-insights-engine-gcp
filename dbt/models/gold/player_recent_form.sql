@@ -18,6 +18,7 @@ with base as (
         ast,
         stl,
         blk,
+        fg3m,
         tov,
         fantasy_points_simple,
         row_number() over (

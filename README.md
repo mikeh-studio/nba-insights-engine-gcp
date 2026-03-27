@@ -59,12 +59,17 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 - `gold.player_category_profile`: category-score profile for fantasy ranking
 - `gold.player_opportunity_outlook`: schedule-only opportunity context
 - `gold.player_fantasy_rankings`: deterministic fantasy ranking surface
+- `gold.workbench_compare`: fixed-window compare input model for `last_5`, `prior_5`, and `last_10`
+- `gold.workbench_dashboard`: dashboard-oriented player read model with bounded reason fields
+- `gold.workbench_player_detail`: player-detail read model built from dashboard + compare windows
 - `gold.fantasy_insights`: structured recommendation cards
 - `gold.fantasy_recommendation_backtest`: forward outcome evaluation for recommendation rows
 - `gold.daily_leaderboard`: daily leaderboard output
 - `gold.analysis_snapshots`: deterministic narrative snapshot output written by the DAG
 
 dbt is intentionally centered on `2025-26` only. The silver layer filters to that season and the accepted in-season date window.
+
+The workbench read models are warehouse preparation for the next app slice. The current FastAPI routes still read from the existing gold tables in this PR.
 
 When Redshift sync is enabled, bronze tables are also available in Redshift under the configured schema (default `nba_bronze`).
 
@@ -93,6 +98,8 @@ Public JSON routes:
 The service reads only from gold tables and metadata tables. It is public read-only for v1 and does not include auth.
 
 Freshness is reported from the latest successful pipeline run in `nba_metadata.pipeline_run_log`, evaluated against a daily freshness threshold.
+
+The new workbench read models are not wired into the repository or public routes yet; this PR only establishes their warehouse contracts.
 
 ## Local Setup
 
@@ -189,6 +196,8 @@ pytest
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
   --exclude analysis_snapshot_latest source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
+dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
+  --select workbench_compare workbench_dashboard workbench_player_detail
 ```
 
 Additional checks when validating Airflow changes:
@@ -207,6 +216,7 @@ Current local validation caveats:
 - `dbt parse` runs locally without warehouse access.
 - `dbt build --target redshift --select path:dbt/models/silver` is the recommended compatibility check for the Redshift secondary warehouse and requires working Redshift credentials plus the `dbt-redshift` adapter.
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
+- The targeted workbench-model `dbt test --select ...` command has the same BigQuery auth requirement.
 - Airflow parse checks require the Airflow CLI/module to be installed in the active environment.
 
 ## Security Hygiene
