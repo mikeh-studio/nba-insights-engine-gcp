@@ -145,7 +145,7 @@ models:
         tests:
           - accepted_values:
               arguments:
-                values: ['partial_until_fg_ft_3pt_available']
+                values: ['partial_until_fg_ft_available']
   - name: player_opportunity_outlook
     columns:
       - name: player_id
@@ -200,3 +200,88 @@ models:
           - accepted_values:
               arguments:
                 values: ['pending', 'hit', 'miss']
+  - name: workbench_compare
+    columns:
+      - name: as_of_date
+        tests: [not_null]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: window_key
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['last_5', 'prior_5', 'last_10']
+  - name: workbench_dashboard
+    columns:
+      - name: as_of_date
+        tests: [not_null]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: overall_rank
+        tests: [not_null]
+      - name: trend_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['rising', 'falling', 'flat', 'insufficient_sample']
+      - name: reason_primary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_secondary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_context_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+  - name: workbench_player_detail
+    columns:
+      - name: as_of_date
+        tests: [not_null]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: overall_rank
+        tests: [not_null]
+      - name: trend_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['rising', 'falling', 'flat', 'insufficient_sample']
+      - name: reason_primary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_secondary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_context_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
