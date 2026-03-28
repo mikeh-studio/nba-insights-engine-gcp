@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import SUPPORTED_SEASON, Settings, get_settings
@@ -12,8 +13,10 @@ from app.repository import BigQueryWarehouseRepository, WarehouseRepository
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+TRACKING_CAP = 8
 
 app = FastAPI(title="NBA 2025-26 Public API", version="1.0.0")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 
 def get_repository(
@@ -65,12 +68,15 @@ def api_rankings(
 def api_player_search(
     repo: Annotated[WarehouseRepository, Depends(get_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
-    q: str = Query(min_length=1),
+    q: str = Query(min_length=1, max_length=64),
 ) -> dict:
+    query = q.strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Search query must not be blank")
     return {
         "season": SUPPORTED_SEASON,
-        "query": q,
-        "items": repo.search_players(q, limit=settings.max_search_results),
+        "query": query,
+        "items": repo.search_players(query, limit=settings.max_search_results),
     }
 
 
@@ -85,6 +91,22 @@ def api_player_detail(
     return {"season": SUPPORTED_SEASON, "item": detail}
 
 
+@app.get("/api/compare")
+def api_compare(
+    player_a_id: int,
+    player_b_id: int,
+    repo: Annotated[WarehouseRepository, Depends(get_repository)],
+    *,
+    window: Literal["last_5", "prior_5", "last_10"] = Query(default="last_5"),
+) -> dict:
+    if player_a_id == player_b_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Compare players must be different",
+        )
+    return repo.get_compare(player_a_id, player_b_id, window=window)
+
+
 @app.get("/api/health")
 def api_health(repo: Annotated[WarehouseRepository, Depends(get_repository)]) -> dict:
     return repo.get_health()
@@ -94,16 +116,15 @@ def api_health(repo: Annotated[WarehouseRepository, Depends(get_repository)]) ->
 def home(
     request: Request, repo: Annotated[WarehouseRepository, Depends(get_repository)]
 ) -> HTMLResponse:
+    dashboard = repo.get_dashboard()
     context = {
         "request": request,
-        "page_title": "NBA 2025-26 Fantasy Dashboard",
+        "page_title": "NBA 2025-26 Stats Dashboard",
         "season": SUPPORTED_SEASON,
-        "recommendations": repo.get_recommendations(limit=5),
-        "rankings": repo.get_rankings(limit=8),
-        "leaderboard": repo.get_leaderboard(),
-        "trends": repo.get_trends(5),
+        "dashboard": dashboard,
         "analysis": repo.get_latest_analysis(),
         "health": repo.get_health(),
+        "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "index.html", context)
 
@@ -119,6 +140,7 @@ def analysis_page(
         "season": SUPPORTED_SEASON,
         "analysis": repo.get_latest_analysis(),
         "health": repo.get_health(),
+        "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "analysis.html", context)
 
@@ -130,10 +152,11 @@ def recommendations_page(
 ) -> HTMLResponse:
     context = {
         "request": request,
-        "page_title": "NBA 2025-26 Fantasy Recommendations",
+        "page_title": "NBA 2025-26 Player Calls",
         "season": SUPPORTED_SEASON,
         "recommendations": repo.get_recommendations(limit=20),
         "health": repo.get_health(),
+        "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "recommendations.html", context)
 
@@ -149,9 +172,46 @@ def player_page(
         raise HTTPException(status_code=404, detail="Player not found")
     context = {
         "request": request,
-        "page_title": f"{player_detail['player']['player_name']} Fantasy Outlook",
+        "page_title": f"{player_detail['player']['player_name']} Stats Outlook",
         "season": SUPPORTED_SEASON,
         "player_detail": player_detail,
         "health": repo.get_health(),
+        "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "player.html", context)
+
+
+@app.get("/compare", response_class=HTMLResponse)
+def compare_page(
+    request: Request,
+    repo: Annotated[WarehouseRepository, Depends(get_repository)],
+    player_a_id: int | None = None,
+    player_b_id: int | None = None,
+    window: Literal["last_5", "prior_5", "last_10"] = Query(default="last_5"),
+) -> HTMLResponse:
+    compare_error: str | None = None
+    comparison: dict | None = None
+    player_a_detail = (
+        repo.get_player_detail(player_a_id) if player_a_id is not None else None
+    )
+    if player_a_id is not None and player_a_detail is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player_a_id is not None and player_b_id is not None:
+        if player_a_id == player_b_id:
+            compare_error = "Compare players must be different."
+        else:
+            comparison = repo.get_compare(player_a_id, player_b_id, window=window)
+    context = {
+        "request": request,
+        "page_title": "Compare Players",
+        "season": SUPPORTED_SEASON,
+        "health": repo.get_health(),
+        "player_a_detail": player_a_detail,
+        "player_a_id": player_a_id,
+        "player_b_id": player_b_id,
+        "comparison": comparison,
+        "compare_error": compare_error,
+        "window": window,
+        "tracking_cap": TRACKING_CAP,
+    }
+    return templates.TemplateResponse(request, "compare.html", context)

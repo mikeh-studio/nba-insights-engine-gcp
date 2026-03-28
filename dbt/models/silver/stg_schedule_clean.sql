@@ -29,5 +29,6 @@ select
     cast(null as {{ bool_type() }}) as is_back_to_back,
     cast(null as {{ varchar_type() }}) as game_status,
     cast(null as timestamp) as source_updated_at_utc
+from (select 1 as _empty_source)
 where 1 = 0
 {% endif %}

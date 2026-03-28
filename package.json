@@ -1,0 +1,8 @@
+{
+  "name": "nba-data-platform-workbench-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:tracking": "node --test tests_js/*.test.js"
+  }
+}
