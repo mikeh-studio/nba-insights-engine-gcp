@@ -1,0 +1,191 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div class="hero-top">
+      <div>
+        <div class="eyebrow">Compare</div>
+        <h1>Player Comparison</h1>
+      </div>
+      <div class="hero-actions">
+        <span class="status">Window {{ window }}</span>
+      </div>
+    </div>
+    <p class="subhead">
+      Compare starts from player detail and keeps the requested window explicit, even when one side has limited data.
+    </p>
+    {% if health.status != "fresh" %}
+      <div class="notice">
+        <strong>Comparison freshness is degraded.</strong>
+        <p>The latest successful warehouse refresh{% if health.last_successful_finished_at_utc %} finished at {{ health.last_successful_finished_at_utc }}{% else %} is unavailable{% endif %}. The selected window remains visible, but schedule and form context may be stale.</p>
+      </div>
+    {% endif %}
+    {% if compare_error %}
+      <div class="notice">
+        <strong>Compare input needs adjustment.</strong>
+        <p>{{ compare_error }}</p>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="workspace">
+    <div class="main-stack">
+      <article class="card compare-builder">
+        <div class="card-header">
+          <h2>Build Comparison</h2>
+        </div>
+        {% if player_a_detail %}
+          <div class="tracked-card">
+            <div class="card-header">
+              <div class="identity-row">
+                <div class="player-avatar" aria-hidden="true">
+                  {% if player_a_detail.player.headshot_url %}
+                    <img src="{{ player_a_detail.player.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+                  {% endif %}
+                  <span class="player-avatar-fallback"{% if player_a_detail.player.headshot_url %} hidden{% endif %}>{{ player_a_detail.player.player_initials }}</span>
+                </div>
+                <div>
+                  <div class="meta">Locked first player</div>
+                  <h3><a href="/players/{{ player_a_detail.player.player_id }}">{{ player_a_detail.player.player_name }}</a></h3>
+                </div>
+              </div>
+              <button
+                class="track-button secondary"
+                type="button"
+                data-track-button
+                data-player-id="{{ player_a_detail.player.player_id }}"
+              >
+                Track player
+              </button>
+            </div>
+            <div class="chip-row">
+              {% if player_a_detail.player.team_abbr %}
+                <span class="chip">{{ player_a_detail.player.team_abbr }}</span>
+              {% endif %}
+              {% if player_a_detail.player.overall_rank %}
+                <span class="chip">Rank #{{ player_a_detail.player.overall_rank }}</span>
+              {% else %}
+                <span class="chip">State {{ player_a_detail.availability_state }}</span>
+              {% endif %}
+            </div>
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>Choose a starting player from detail.</strong>
+            <p class="meta">Compare is designed as a next move after inspection, but the page still works if you paste a player ID into the URL manually.</p>
+          </div>
+        {% endif %}
+
+        {% if player_a_id %}
+          <form class="compare-form" data-compare-search-form data-player-a-id="{{ player_a_id }}" data-window="{{ window }}">
+            <label class="sr-only" for="compare-player-search">Compare against</label>
+            <input class="input" id="compare-player-search" name="q" placeholder="Search second player" />
+            <select class="select" name="window" aria-label="Compare window">
+              {% for option in ["last_5", "prior_5", "last_10"] %}
+                <option value="{{ option }}"{% if option == window %} selected{% endif %}>{{ option }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="button">Load comparison</button>
+            <span class="meta" data-compare-search-message></span>
+          </form>
+        {% endif %}
+
+        <details class="explain">
+          <summary>How this works</summary>
+          <p>Compare uses the fixed-window compare model only. The requested window never silently changes, and a weak side stays visible with an explicit limitation message.</p>
+        </details>
+      </article>
+
+      {% if comparison %}
+        <article class="card">
+          <div class="card-header">
+            <h2>Comparison Surface</h2>
+            <div class="chip-row">
+              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=last_5">Last 5</a>
+              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=prior_5">Prior 5</a>
+              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=last_10">Last 10</a>
+            </div>
+          </div>
+          <div class="compare-grid">
+            {% for side_key in ["player_a", "player_b"] %}
+              {% set side = comparison.comparison[side_key] %}
+              <article class="compare-panel{% if side.state != 'fresh' %} limited{% endif %}">
+                <div class="card-header">
+                  <div class="identity-row">
+                    <div class="player-avatar" aria-hidden="true">
+                      {% if side.headshot_url %}
+                        <img src="{{ side.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+                      {% endif %}
+                      <span class="player-avatar-fallback"{% if side.headshot_url %} hidden{% endif %}>{{ side.player_initials }}</span>
+                    </div>
+                    <div>
+                      <h3>{{ side.player_name or "Unknown player" }}</h3>
+                      <p class="meta">{{ side.latest_team_abbr or "NBA" }} · {{ side.window }}</p>
+                    </div>
+                  </div>
+                  <button
+                    class="track-button secondary"
+                    type="button"
+                    data-track-button
+                    data-player-id="{{ side.player_id }}"
+                  >
+                    Track player
+                  </button>
+                </div>
+                <div class="chip-row">
+                  <span class="chip">State {{ side.state }}</span>
+                  {% if side.games_in_window is not none %}
+                    <span class="chip">{{ side.games_in_window }}/{{ side.window_games_expected }} games</span>
+                  {% endif %}
+                </div>
+                {% if side.state_reason %}
+                  <div class="notice">
+                    <strong>Limited comparison data.</strong>
+                    <p>{{ side.state_reason }}</p>
+                  </div>
+                {% endif %}
+                <table class="data-table">
+                  <tbody>
+                    <tr><th>Box Score Index</th><td>{{ side.metrics.fantasy_proxy_score }}</td></tr>
+                    <tr><th>Minutes</th><td>{{ side.metrics.avg_min }}</td></tr>
+                    <tr><th>PTS</th><td>{{ side.metrics.avg_pts }}</td></tr>
+                    <tr><th>REB</th><td>{{ side.metrics.avg_reb }}</td></tr>
+                    <tr><th>AST</th><td>{{ side.metrics.avg_ast }}</td></tr>
+                    <tr><th>STL</th><td>{{ side.metrics.avg_stl }}</td></tr>
+                    <tr><th>BLK</th><td>{{ side.metrics.avg_blk }}</td></tr>
+                    <tr><th>3PM</th><td>{{ side.metrics.avg_fg3m }}</td></tr>
+                    <tr><th>TOV</th><td>{{ side.metrics.avg_tov }}</td></tr>
+                  </tbody>
+                </table>
+              </article>
+            {% endfor %}
+          </div>
+        </article>
+      {% elif player_a_id %}
+        <article class="card">
+          <div class="empty-state">
+            <strong>Pick a second player to finish the comparison.</strong>
+            <p class="meta">Search for the second player above. The compare surface will keep the selected window and show limitations explicitly if one side lacks enough history.</p>
+          </div>
+        </article>
+      {% endif %}
+    </div>
+
+    <aside class="rail-stack">
+      {% if player_a_detail %}
+        <article class="card">
+          <div class="card-header">
+            <h2>Player A Context</h2>
+          </div>
+          {% if player_a_detail.reason_summary %}
+            <p>{{ player_a_detail.reason_summary }}</p>
+          {% else %}
+            <div class="empty-state">
+              <strong>No bounded reason summary is available.</strong>
+              <p class="meta">The player can still be compared, but the detail explanation is unavailable.</p>
+            </div>
+          {% endif %}
+        </article>
+      {% endif %}
+    </aside>
+  </section>
+{% endblock %}

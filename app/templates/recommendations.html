@@ -1,33 +1,65 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="hero">
-    <div class="eyebrow">Curated Fantasy Calls</div>
-    <h1>{{ page_title }}</h1>
-    <p class="subhead">
-      Deterministic recommendation cards generated from gold warehouse outputs for 9-cat fantasy.
-    </p>
-    <div class="status">
-      Freshness: {{ health.status }}{% if health.age_hours is not none %} · {{ health.age_hours }}h old{% endif %}
+    <div class="hero-top">
+      <div>
+        <div class="eyebrow">Calls</div>
+        <h1>{{ page_title }}</h1>
+      </div>
+      <div class="hero-actions">
+        <span class="status">Freshness {{ health.status }}{% if health.age_hours is not none %} · {{ health.age_hours }}h{% endif %}</span>
+      </div>
     </div>
+    <p class="subhead">Deterministic recommendation cards remain a supporting surface beside the main discover, inspect, and compare workflow.</p>
   </section>
 
-  <section class="grid">
-    {% for item in recommendations %}
+  <section class="workspace">
+    <div class="main-stack">
       <article class="card">
-        <div class="eyebrow">{{ item.insight_type }}</div>
-        <h2><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h2>
-        <p class="meta">
-          {{ item.recommendation }} · priority {{ item.priority_score }} · confidence {{ item.confidence_score }}
-        </p>
-        <p>{{ item.title }}</p>
-        <p>{{ item.summary }}</p>
-        <div class="chips">
-          {% if item.category_focus %}
-            <span class="chip">{{ item.category_focus }}</span>
-          {% endif %}
-          <span class="chip">{{ item.as_of_date }}</span>
+        <div class="card-header">
+          <h2>Recommendation Feed</h2>
+        </div>
+        <div class="stack">
+          {% for item in recommendations %}
+            <article class="signal">
+              <div class="signal-top">
+                <div>
+                  <div class="meta">{{ item.insight_type }}</div>
+                  <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
+                </div>
+                <button
+                  class="track-button secondary"
+                  type="button"
+                  data-track-button
+                  data-player-id="{{ item.player_id }}"
+                >
+                  Track player
+                </button>
+              </div>
+              <p class="meta">{{ item.recommendation }} · priority {{ item.priority_score }} · confidence {{ item.confidence_score }}</p>
+              <p><strong>{{ item.title }}</strong></p>
+              <p>{{ item.summary }}</p>
+              <div class="chip-row">
+                {% if item.category_focus %}
+                  <span class="chip">{{ item.category_focus }}</span>
+                {% endif %}
+                <span class="chip">{{ item.as_of_date }}</span>
+              </div>
+            </article>
+          {% endfor %}
         </div>
       </article>
-    {% endfor %}
+    </div>
+    <aside class="rail-stack">
+      <article class="card">
+        <div class="card-header">
+          <h2>Usage</h2>
+        </div>
+        <details class="explain" open>
+          <summary>How this works</summary>
+          <p>Recommendation cards remain deterministic and lightweight. They support the workbench, but the core path still runs through discovery, player detail, and compare.</p>
+        </details>
+      </article>
+    </aside>
   </section>
 {% endblock %}
