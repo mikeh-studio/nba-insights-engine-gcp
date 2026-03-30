@@ -84,8 +84,7 @@ select
                 struct('AST' as stat_name, z_ast as stat_value),
                 struct('STL' as stat_name, z_stl as stat_value),
                 struct('BLK' as stat_name, z_blk as stat_value),
-                struct('FG3M' as stat_name, z_fg3m as stat_value),
-                struct('TOV' as stat_name, z_tov as stat_value)
+                struct('FG3M' as stat_name, z_fg3m as stat_value)
             ])
             where stat_value >= 0.5
             order by stat_value desc, stat_name
