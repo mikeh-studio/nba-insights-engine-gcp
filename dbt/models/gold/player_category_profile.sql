@@ -8,7 +8,6 @@ with player_means as (
         season,
         player_id,
         player_name,
-        max(team_abbr) as team_abbr,
         round(avg(pts), 2) as avg_pts,
         round(avg(reb), 2) as avg_reb,
         round(avg(ast), 2) as avg_ast,
@@ -21,6 +20,24 @@ with player_means as (
         count(*) as games_sampled
     from {{ ref('fct_player_game_stats') }}
     group by 1, 2, 3
+),
+latest_team as (
+    select
+        season,
+        player_id,
+        team_abbr as latest_team_abbr
+    from (
+        select
+            season,
+            player_id,
+            team_abbr,
+            row_number() over (
+                partition by season, player_id
+                order by game_date desc, ingested_at_utc desc
+            ) as row_num
+        from {{ ref('fct_player_game_stats') }}
+    )
+    where row_num = 1
 ),
 league_baseline as (
     select
@@ -48,7 +65,7 @@ select
     p.season,
     p.player_id,
     p.player_name,
-    p.team_abbr,
+    t.latest_team_abbr,
     p.games_sampled,
     p.avg_pts,
     p.avg_reb,
@@ -74,7 +91,6 @@ select
         + coalesce({{ safe_divide('p.avg_ast - b.league_avg_ast', 'nullif(b.league_sd_ast, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_stl - b.league_avg_stl', 'nullif(b.league_sd_stl, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_blk - b.league_avg_blk', 'nullif(b.league_sd_blk, 0)') }}, 0)
-        - coalesce({{ safe_divide('p.avg_tov - b.league_avg_tov', 'nullif(b.league_sd_tov, 0)') }}, 0),
         2
     ) as category_score_6cat,
     round(
@@ -83,12 +99,14 @@ select
         + coalesce({{ safe_divide('p.avg_ast - b.league_avg_ast', 'nullif(b.league_sd_ast, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_stl - b.league_avg_stl', 'nullif(b.league_sd_stl, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_blk - b.league_avg_blk', 'nullif(b.league_sd_blk, 0)') }}, 0)
-        + coalesce({{ safe_divide('p.avg_fg3m - b.league_avg_fg3m', 'nullif(b.league_sd_fg3m, 0)') }}, 0)
-        - coalesce({{ safe_divide('p.avg_tov - b.league_avg_tov', 'nullif(b.league_sd_tov, 0)') }}, 0),
+        + coalesce({{ safe_divide('p.avg_fg3m - b.league_avg_fg3m', 'nullif(b.league_sd_fg3m, 0)') }}, 0),
         2
     ) as category_score_7cat,
-    7 as available_category_count,
-    9 as target_category_count,
-    'partial_until_fg_ft_available' as category_coverage_status
+    6 as available_category_count,
+    8 as target_category_count,
+    'partial_until_fg_ft_available_no_tov' as category_coverage_status
 from player_means p
+left join latest_team t
+    on p.season = t.season
+   and p.player_id = t.player_id
 cross join league_baseline b

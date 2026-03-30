@@ -83,7 +83,6 @@ Planned curated tables include:
 - `silver.int_player_game_enriched`
 - `gold.fct_player_game_stats`
 - `gold.dim_player`
-- `gold.dim_team`
 - `gold.player_trends`
 - `gold.daily_leaderboard`
 
@@ -109,11 +108,13 @@ Current hard gates already include:
 - zero-row protection
 - null business key checks
 - duplicate business key checks
+- merge reconciliation checks on loaded vs inserted/updated/post-count accounting
 
 The target observability layer should add:
 
 - pipeline run metadata tables
 - row-count and inserted/updated metrics
+- merge reconciliation summaries
 - freshness tracking
 - alert hooks for failures or stale data
 - warehouse-level tests for keys, relationships, and accepted values

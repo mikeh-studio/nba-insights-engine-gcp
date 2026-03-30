@@ -1,10 +1,10 @@
 # NBA Data Platform
 
-Production-style NBA data pipeline and public fantasy-facing service for the `2025-26` season only. Built on **GCP** (BigQuery, GCS, Cloud Run) with an optional **AWS** secondary warehouse (Redshift Serverless, S3).
+Production-style NBA data pipeline and public NBA stats workbench for the `2025-26` season only. Built on **GCP** (BigQuery, GCS, Cloud Run) with an optional **AWS** secondary warehouse (Redshift Serverless, S3).
 
 The v1 target architecture is:
 
-`NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> fantasy rankings + insights -> deterministic analysis snapshots -> Cloud Run site/API`
+`NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> rankings + insights -> deterministic analysis snapshots -> Cloud Run site/API`
 
 With optional Redshift sync:
 
@@ -33,8 +33,8 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 3. Fetch the upcoming schedule window from `nba_api`.
 4. Land both domains in GCS and load them into bronze staging tables.
 5. Run DQ checks for game logs and schedule context.
-6. Merge into `bronze.raw_game_logs` and `bronze.raw_schedule`.
-7. Run dbt bronze/silver/gold models and tests for the fantasy serving layer.
+6. Merge into `bronze.raw_game_logs` and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
+7. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
 8. Build a deterministic `gold.analysis_snapshots` record from leaderboard, trend, ranking, and recommendation outputs.
 9. Publish watermark and run metadata to `nba_metadata`.
 
@@ -53,17 +53,16 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 - `silver.stg_schedule_clean`: cleaned schedule context
 - `gold.fct_player_game_stats`: fact table for player game stats
 - `gold.dim_player`: player dimension
-- `gold.dim_team`: team dimension
 - `gold.player_trends`: recent-vs-prior player trend model
-- `gold.player_recent_form`: rolling recent form and fantasy proxy output
-- `gold.player_category_profile`: category-score profile for fantasy ranking
+- `gold.player_recent_form`: rolling recent form and box-score-derived proxy output
+- `gold.player_category_profile`: category-score profile for the ranking surface
 - `gold.player_opportunity_outlook`: schedule-only opportunity context
-- `gold.player_fantasy_rankings`: deterministic fantasy ranking surface
-- `gold.workbench_compare`: fixed-window compare input model for `last_5`, `prior_5`, and `last_10`
+- `gold.player_fantasy_rankings`: deterministic ranking surface
+- `gold.workbench_compare`: fixed-window compare input model for bounded compare windows
 - `gold.workbench_dashboard`: dashboard-oriented player read model with bounded reason fields
+- `gold.workbench_home_dashboard`: seven-day dashboard snapshot model keyed by `as_of_date`
 - `gold.workbench_player_detail`: player-detail read model built from dashboard + compare windows
 - `gold.fantasy_insights`: structured recommendation cards
-- `gold.fantasy_recommendation_backtest`: forward outcome evaluation for recommendation rows
 - `gold.daily_leaderboard`: daily leaderboard output
 - `gold.analysis_snapshots`: deterministic narrative snapshot output written by the DAG
 
@@ -83,6 +82,7 @@ Public HTML routes:
 - `/analysis`
 - `/recommendations`
 - `/players/{player_id}`
+- `/compare`
 
 Public JSON routes:
 
@@ -93,13 +93,14 @@ Public JSON routes:
 - `/api/rankings`
 - `/api/players/search`
 - `/api/players/{player_id}`
+- `/api/compare`
 - `/api/health`
 
 The service reads only from gold tables and metadata tables. It is public read-only for v1 and does not include auth.
 
 Freshness is reported from the latest successful pipeline run in `nba_metadata.pipeline_run_log`, evaluated against a daily freshness threshold.
 
-The new workbench read models are not wired into the repository or public routes yet; this PR only establishes their warehouse contracts.
+The workbench read models are warehouse preparation for the next app slice. The current FastAPI routes still read from the existing gold tables in this PR.
 
 ## Local Setup
 
@@ -195,9 +196,9 @@ python -m compileall dags app tests
 pytest
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
-  --exclude analysis_snapshot_latest source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
+  --exclude source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
-  --select workbench_compare workbench_dashboard workbench_player_detail
+  --select workbench_compare workbench_dashboard workbench_home_dashboard workbench_player_detail
 ```
 
 Additional checks when validating Airflow changes:

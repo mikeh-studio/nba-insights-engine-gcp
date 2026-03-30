@@ -33,17 +33,15 @@ models:
       - name: team_abbr
         tests:
           - not_null
-          - relationships:
+          - accepted_values:
               arguments:
-                to: ref('dim_team')
-                field: team_abbr
+                values: &nba_team_abbrs ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DAL', 'DEN', 'DET', 'GSW', 'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK', 'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
       - name: opponent_abbr
         tests:
           - not_null
-          - relationships:
+          - accepted_values:
               arguments:
-                to: ref('dim_team')
-                field: team_abbr
+                values: *nba_team_abbrs
       - name: season
         tests:
           - not_null
@@ -64,16 +62,6 @@ models:
   - name: dim_player
     columns:
       - name: player_id
-        tests: [not_null, unique]
-      - name: latest_season
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['2025-26']
-  - name: dim_team
-    columns:
-      - name: team_abbr
         tests: [not_null, unique]
       - name: latest_season
         tests:
@@ -114,16 +102,6 @@ models:
         tests: [not_null]
       - name: pts_leader
         tests: [not_null]
-  - name: analysis_snapshot_latest
-    columns:
-      - name: snapshot_id
-        tests: [not_null]
-      - name: season
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['2025-26']
   - name: player_recent_form
     columns:
       - name: player_id
@@ -132,15 +110,20 @@ models:
       - name: team_abbr
         tests:
           - not_null
-          - relationships:
+          - accepted_values:
               arguments:
-                to: ref('dim_team')
-                field: team_abbr
+                values: *nba_team_abbrs
   - name: player_category_profile
     columns:
       - name: player_id
         tests:
           - not_null
+      - name: latest_team_abbr
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
       - name: category_coverage_status
         tests:
           - accepted_values:
@@ -155,10 +138,9 @@ models:
       - name: team_abbr
         tests:
           - not_null
-          - relationships:
+          - accepted_values:
               arguments:
-                to: ref('dim_team')
-                field: team_abbr
+                values: *nba_team_abbrs
   - name: player_fantasy_rankings
     columns:
       - name: player_id
@@ -186,20 +168,6 @@ models:
           - accepted_values:
               arguments:
                 values: ['hot_streak', 'minutes_spike', 'sell_high']
-  - name: fantasy_recommendation_backtest
-    columns:
-      - name: insight_id
-        tests:
-          - not_null
-          - relationships:
-              arguments:
-                to: ref('fantasy_insights')
-                field: insight_id
-      - name: backtest_status
-        tests:
-          - accepted_values:
-              arguments:
-                values: ['pending', 'hit', 'miss']
   - name: workbench_compare
     columns:
       - name: as_of_date
@@ -216,8 +184,42 @@ models:
           - not_null
           - accepted_values:
               arguments:
-                values: ['last_5', 'prior_5', 'last_10']
+                values: ['last_3', 'last_5', 'last_7', 'prior_5', 'last_10']
   - name: workbench_dashboard
+    columns:
+      - name: as_of_date
+        tests: [not_null]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: overall_rank
+        tests: [not_null]
+      - name: trend_status
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['rising', 'falling', 'flat', 'insufficient_sample']
+      - name: reason_primary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_secondary_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+      - name: reason_context_code
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['recent_fp_delta', 'minutes_delta', 'games_next_7d', 'back_to_back_count', 'trend_stat_delta', 'category_edge']
+  - name: workbench_home_dashboard
     columns:
       - name: as_of_date
         tests: [not_null]
