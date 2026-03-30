@@ -341,12 +341,22 @@ def nba_analytics_pipeline():
         result = pipeline.create_and_merge_raw_table(
             client, load_result["staging_table"], raw_table
         )
+        reconciliation = pipeline.validate_merge_reconciliation(
+            domain="game_logs",
+            rows_loaded=load_result["row_count"],
+            pre_count=result["pre_count"],
+            post_count=result["post_count"],
+            inserted=result["inserted"],
+            updated=result["updated"],
+        )
         return {
             "domain": "game_logs",
             "raw_table": raw_table,
             "rows_loaded": load_result["row_count"],
             "rows_inserted": result["inserted"],
             "rows_updated": result["updated"],
+            "rows_unchanged": reconciliation["unchanged"],
+            "reconciliation": reconciliation,
             "season": load_result["season"],
             "gcs_uri": load_result["gcs_uri"],
             "watermark_before": load_result["watermark_before"],
@@ -380,12 +390,22 @@ def nba_analytics_pipeline():
         result = pipeline.create_and_merge_schedule_table(
             client, load_result["staging_table"], raw_table
         )
+        reconciliation = pipeline.validate_merge_reconciliation(
+            domain="schedule",
+            rows_loaded=load_result["row_count"],
+            pre_count=result["pre_count"],
+            post_count=result["post_count"],
+            inserted=result["inserted"],
+            updated=result["updated"],
+        )
         return {
             "domain": "schedule",
             "raw_table": raw_table,
             "rows_loaded": load_result["row_count"],
             "rows_inserted": result["inserted"],
             "rows_updated": result["updated"],
+            "rows_unchanged": reconciliation["unchanged"],
+            "reconciliation": reconciliation,
             "season": load_result["season"],
             "gcs_uri": load_result["gcs_uri"],
             "dq_results": load_result.get("dq_results", {}),
@@ -410,12 +430,18 @@ def nba_analytics_pipeline():
             "rows_loaded": game_result["rows_loaded"],
             "rows_inserted": game_result["rows_inserted"],
             "rows_updated": game_result["rows_updated"],
+            "rows_unchanged": game_result.get("rows_unchanged", 0),
             "schedule_rows_loaded": schedule_result["rows_loaded"],
             "schedule_rows_inserted": schedule_result["rows_inserted"],
             "schedule_rows_updated": schedule_result["rows_updated"],
+            "schedule_rows_unchanged": schedule_result.get("rows_unchanged", 0),
             "dq_results": {
                 "game_logs": game_result.get("dq_results", {}),
                 "schedule": schedule_result.get("dq_results", {}),
+            },
+            "reconciliation": {
+                "game_logs": game_result.get("reconciliation", {}),
+                "schedule": schedule_result.get("reconciliation", {}),
             },
             "should_build": any(
                 [
@@ -446,7 +472,6 @@ def nba_analytics_pipeline():
             "--target",
             target,
             "--exclude",
-            "analysis_snapshot_latest",
             "source:gold_runtime.analysis_snapshots",
             "path:dbt/tests/no_duplicate_analysis_snapshots.sql",
         ]
@@ -601,8 +626,11 @@ def nba_analytics_pipeline():
                 f"analysis_snapshot_status={run_result.get('analysis_snapshot_status', 'unknown')};"
                 f"analysis_snapshot_id={run_result.get('analysis_snapshot_id', '')};"
                 f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
+                f"rows_unchanged={run_result.get('rows_unchanged', 0)};"
+                f"schedule_rows_unchanged={run_result.get('schedule_rows_unchanged', 0)};"
                 f"redshift_status={run_result.get('redshift_status', get_config('ENABLE_REDSHIFT', 'false'))};"
-                f"dq={run_result.get('dq_results', {})}"
+                f"dq={run_result.get('dq_results', {})};"
+                f"reconciliation={run_result.get('reconciliation', {})}"
             ),
         )
         pipeline.record_pipeline_run(client, run_table, record)
@@ -709,7 +737,6 @@ def nba_analytics_pipeline():
             "--target",
             "redshift",
             "--exclude",
-            "analysis_snapshot_latest",
             "source:gold_runtime.analysis_snapshots",
             "path:dbt/tests/no_duplicate_analysis_snapshots.sql",
         ]

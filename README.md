@@ -33,7 +33,7 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 3. Fetch the upcoming schedule window from `nba_api`.
 4. Land both domains in GCS and load them into bronze staging tables.
 5. Run DQ checks for game logs and schedule context.
-6. Merge into `bronze.raw_game_logs` and `bronze.raw_schedule`.
+6. Merge into `bronze.raw_game_logs` and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
 7. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
 8. Build a deterministic `gold.analysis_snapshots` record from leaderboard, trend, ranking, and recommendation outputs.
 9. Publish watermark and run metadata to `nba_metadata`.
@@ -53,17 +53,17 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 - `silver.stg_schedule_clean`: cleaned schedule context
 - `gold.fct_player_game_stats`: fact table for player game stats
 - `gold.dim_player`: player dimension
-- `gold.dim_team`: team dimension
 - `gold.player_trends`: recent-vs-prior player trend model
 - `gold.player_recent_form`: rolling recent form and box-score-derived proxy output
 - `gold.player_category_profile`: category-score profile for the ranking surface
 - `gold.player_opportunity_outlook`: schedule-only opportunity context
 - `gold.player_fantasy_rankings`: deterministic ranking surface
-- `gold.workbench_compare`: fixed-window compare input model for `last_5`, `prior_5`, and `last_10`
+<<<<<<< HEAD
+- `gold.workbench_compare`: fixed-window compare input model for bounded compare windows
 - `gold.workbench_dashboard`: dashboard-oriented player read model with bounded reason fields
+- `gold.workbench_home_dashboard`: seven-day dashboard snapshot model keyed by `as_of_date`
 - `gold.workbench_player_detail`: player-detail read model built from dashboard + compare windows
 - `gold.fantasy_insights`: structured recommendation cards
-- `gold.fantasy_recommendation_backtest`: forward outcome evaluation for recommendation rows
 - `gold.daily_leaderboard`: daily leaderboard output
 - `gold.analysis_snapshots`: deterministic narrative snapshot output written by the DAG
 
@@ -101,7 +101,7 @@ The service reads only from gold tables and metadata tables. It is public read-o
 
 Freshness is reported from the latest successful pipeline run in `nba_metadata.pipeline_run_log`, evaluated against a daily freshness threshold.
 
-The workbench app now reads from the new screen-oriented workbench models for dashboard, player detail, and compare flows. Browser-local tracking is client-side only, versioned, capped at 8 player IDs, and hydrated using the existing player-detail API instead of a dedicated tracking endpoint. Player identity surfaces use NBA headshots when available, with graceful fallbacks when an image is missing.
+The workbench app now reads from the new screen-oriented workbench models for dashboard, player detail, compare, and date-keyed home snapshot flows. Browser-local tracking is client-side only, versioned, capped at 8 player IDs, and hydrated using the existing player-detail API instead of a dedicated tracking endpoint. Player identity surfaces use NBA headshots when available, with graceful fallbacks when an image is missing.
 
 ## Local Setup
 
@@ -198,9 +198,9 @@ pytest
 npm run test:tracking
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
-  --exclude analysis_snapshot_latest source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
+  --exclude source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
-  --select workbench_compare workbench_dashboard workbench_player_detail
+  --select workbench_compare workbench_dashboard workbench_home_dashboard workbench_player_detail
 ```
 
 Additional checks when validating Airflow changes:

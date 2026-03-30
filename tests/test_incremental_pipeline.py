@@ -198,6 +198,56 @@ def test_build_run_metadata_record_serializes_dates():
     assert record["rows_updated"] == 6
 
 
+def test_validate_merge_reconciliation_returns_unchanged_rows():
+    result = pipeline.validate_merge_reconciliation(
+        domain="game_logs",
+        rows_loaded=10,
+        pre_count=100,
+        post_count=104,
+        inserted=4,
+        updated=3,
+    )
+
+    assert result["rows_loaded"] == 10
+    assert result["pre_count"] == 100
+    assert result["post_count"] == 104
+    assert result["inserted"] == 4
+    assert result["updated"] == 3
+    assert result["unchanged"] == 3
+
+
+def test_validate_merge_reconciliation_rejects_insert_update_overflow():
+    try:
+        pipeline.validate_merge_reconciliation(
+            domain="schedule",
+            rows_loaded=5,
+            pre_count=20,
+            post_count=23,
+            inserted=3,
+            updated=3,
+        )
+    except ValueError as exc:
+        assert "inserted+updated" in str(exc)
+    else:
+        raise AssertionError("Expected reconciliation overflow to raise ValueError")
+
+
+def test_validate_merge_reconciliation_rejects_post_count_mismatch():
+    try:
+        pipeline.validate_merge_reconciliation(
+            domain="game_logs",
+            rows_loaded=4,
+            pre_count=10,
+            post_count=15,
+            inserted=3,
+            updated=1,
+        )
+    except ValueError as exc:
+        assert "expected post_count 13" in str(exc)
+    else:
+        raise AssertionError("Expected post_count mismatch to raise ValueError")
+
+
 def test_build_analysis_snapshot_record_is_deterministic():
     daily_leaders = pd.DataFrame(
         [

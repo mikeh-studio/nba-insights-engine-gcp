@@ -602,6 +602,49 @@ def run_data_quality_checks(
     return dq
 
 
+def validate_merge_reconciliation(
+    *,
+    domain: str,
+    rows_loaded: int,
+    pre_count: int,
+    post_count: int,
+    inserted: int,
+    updated: int,
+) -> Dict[str, int]:
+    """Validate that merge accounting is internally consistent."""
+    if rows_loaded < 0:
+        raise ValueError(f"Reconciliation failed for {domain}: rows_loaded cannot be negative")
+    if any(value < 0 for value in (pre_count, post_count, inserted, updated)):
+        raise ValueError(
+            f"Reconciliation failed for {domain}: merge counts cannot be negative"
+        )
+
+    if inserted + updated > rows_loaded:
+        raise ValueError(
+            f"Reconciliation failed for {domain}: inserted+updated "
+            f"({inserted + updated}) exceeds rows_loaded ({rows_loaded})"
+        )
+
+    expected_post_count = pre_count + inserted
+    if post_count != expected_post_count:
+        raise ValueError(
+            f"Reconciliation failed for {domain}: expected post_count "
+            f"{expected_post_count} from pre_count {pre_count} + inserted {inserted}, "
+            f"got {post_count}"
+        )
+
+    result = {
+        "rows_loaded": int(rows_loaded),
+        "pre_count": int(pre_count),
+        "post_count": int(post_count),
+        "inserted": int(inserted),
+        "updated": int(updated),
+        "unchanged": int(rows_loaded - inserted - updated),
+    }
+    logger.info("Reconciliation passed for %s: %s", domain, result)
+    return result
+
+
 def create_and_merge_raw_table(
     bq_client: bigquery.Client, staging_table: str, raw_table: str
 ) -> Dict[str, int]:

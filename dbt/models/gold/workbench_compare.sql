@@ -67,6 +67,25 @@ windowed as (
     select
         season,
         player_id,
+        'last_3' as window_key,
+        3 as window_games_expected,
+        min,
+        pts,
+        reb,
+        ast,
+        stl,
+        blk,
+        fg3m,
+        tov,
+        fantasy_proxy_score
+    from scored_games
+    where game_num <= 3
+
+    union all
+
+    select
+        season,
+        player_id,
         'last_5' as window_key,
         5 as window_games_expected,
         min,
@@ -80,6 +99,25 @@ windowed as (
         fantasy_proxy_score
     from scored_games
     where game_num <= 5
+
+    union all
+
+    select
+        season,
+        player_id,
+        'last_7' as window_key,
+        7 as window_games_expected,
+        min,
+        pts,
+        reb,
+        ast,
+        stl,
+        blk,
+        fg3m,
+        tov,
+        fantasy_proxy_score
+    from scored_games
+    where game_num <= 7
 
     union all
 
