@@ -1,127 +1,164 @@
 {% extends "base.html" %}
 {% block content %}
   <section class="hero">
-    <div class="eyebrow">Fantasy Decision Surface</div>
-    <h1>{{ page_title }}</h1>
-    <p class="subhead">
-      Warehouse-driven recommendations, 9-cat rankings, player trends, and freshness for the fixed
-      {{ season }} scope.
-    </p>
-    <div class="status">
-      Freshness: {{ health.status }}{% if health.age_hours is not none %} · {{ health.age_hours }}h old{% endif %}
+    <div class="hero-top">
+      <div>
+        <h1>Stats Dashboard</h1>
+      </div>
+      <div class="hero-actions">
+        <span class="status">Last refresh {% if health.last_successful_finished_at_utc %}{{ health.last_successful_finished_at_utc }}{% else %}unavailable{% endif %}</span>
+      </div>
     </div>
   </section>
 
-  <section class="grid">
-    <article class="card">
-      <h2>Top Recommendations</h2>
-      <div class="stack">
-        {% for item in recommendations %}
-          <div>
-            <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
-            <p class="meta">{{ item.insight_type }} · {{ item.recommendation }} · priority {{ item.priority_score }}</p>
-            <p><strong>{{ item.title }}</strong></p>
-            <p>{{ item.summary }}</p>
-          </div>
+  <section class="card">
+    <div class="card-header">
+      <h2>Choose Day</h2>
+      <div class="meta">Latest 7 days</div>
+    </div>
+    {% if dashboard.date_options %}
+      <div class="chip-row">
+        {% for option in dashboard.date_options %}
+          <a class="button-link{% if not option.is_selected %} secondary{% endif %}" href="/?as_of_date={{ option.value }}">{{ option.label }}</a>
         {% endfor %}
       </div>
-    </article>
-
-    <article class="card">
-      <h2>9-Cat Rankings</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Rank</th>
-            <th>Player</th>
-            <th>Score</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for item in rankings %}
-            <tr>
-              <td>{{ item.overall_rank }}</td>
-              <td><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></td>
-              <td>{{ item.recommendation_score }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </article>
+    {% else %}
+      <div class="empty-state">
+        <strong>No dashboard dates are available.</strong>
+        <p class="meta">The homepage will populate after the home dashboard model is built.</p>
+      </div>
+    {% endif %}
   </section>
 
-  <section class="grid">
-    <article class="card">
-      <h2>Top Trends</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Player</th>
-            <th>Stat</th>
-            <th>Delta</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for item in trends %}
-            <tr>
-              <td>{{ item.player_name }}</td>
-              <td>{{ item.stat }}</td>
-              <td>{{ item.delta }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </article>
+  <section class="workspace">
+    <div class="main-stack">
+      <article class="card">
+        <div class="card-header">
+          <h2>Signal Board</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
+        </div>
+        {% if dashboard.signals %}
+          <div class="signal-board">
+            {% for item in dashboard.signals %}
+              <article class="signal">
+                <div class="signal-top">
+                  <div class="identity-row">
+                    <div class="player-avatar" aria-hidden="true">
+                      {% if item.headshot_url %}
+                        <img src="{{ item.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+                      {% endif %}
+                      <span class="player-avatar-fallback"{% if item.headshot_url %} hidden{% endif %}>{{ item.player_initials }}</span>
+                    </div>
+                    <div>
+                      <div class="meta">Top signal</div>
+                      <h3>{{ item.player_name }}</h3>
+                    </div>
+                  </div>
+                  <div class="signal-rank">#{{ item.overall_rank }}</div>
+                </div>
+                <p class="meta">{{ item.latest_team_abbr or "NBA" }} · score {{ item.recommendation_score }}</p>
+                <div class="chip-row">
+                  {% for improvement in item.top_improvements %}
+                    <span class="chip improvement">{{ improvement.label }} +{{ improvement.delta }}</span>
+                  {% endfor %}
+                  {% if item.category_strengths %}
+                    <span class="chip">Strengths {{ item.category_strengths }}</span>
+                  {% endif %}
+                  <span class="chip" title="Trend {{ item.trend_status }}">
+                    {% if item.trend_direction == "up" %}
+                      <span aria-hidden="true">&#8599;</span>
+                    {% elif item.trend_direction == "down" %}
+                      <span aria-hidden="true">&#8600;</span>
+                    {% else %}
+                      <span aria-hidden="true">&#8594;</span>
+                    {% endif %}
+                    <span class="sr-only">Trend {{ item.trend_status }}</span>
+                  </span>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>No signal board data is available.</strong>
+            <p class="meta">Pick another day or refresh the home dashboard model.</p>
+          </div>
+        {% endif %}
+        <details class="explain">
+          <summary>How this works</summary>
+          <p>Signals come from the home dashboard snapshot for the selected day, using bounded reason fields, recent trend, and forward-looking schedule context from that day.</p>
+        </details>
+      </article>
+    </div>
 
-    <article class="card">
-      <h2>Latest Leaderboard</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Date</th>
-            <th>Scoring</th>
-            <th>Rebounds</th>
-            <th>Assists</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for item in leaderboard %}
-            <tr>
-              <td>{{ item.game_date }}</td>
-              <td>{{ item.pts_leader }} ({{ item.pts }})</td>
-              <td>{{ item.reb_leader }} ({{ item.reb }})</td>
-              <td>{{ item.ast_leader }} ({{ item.ast }})</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </article>
-  </section>
+    <aside class="rail-stack">
+      <article class="card">
+        <div class="card-header">
+          <h2>Trend Watch</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
+        </div>
+        {% if dashboard.trends %}
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Status</th>
+                <th>Delta</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for item in dashboard.trends %}
+                <tr>
+                  <td>{{ item.player_name }}</td>
+                  <td title="Trend {{ item.trend_status }}">
+                    {% if item.trend_direction == "up" %}
+                      <span aria-hidden="true">&#8599;</span>
+                    {% elif item.trend_direction == "down" %}
+                      <span aria-hidden="true">&#8600;</span>
+                    {% else %}
+                      <span aria-hidden="true">&#8594;</span>
+                    {% endif %}
+                    <span class="sr-only">{{ item.trend_status }}</span>
+                  </td>
+                  <td>{{ item.trend_delta }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="empty-state">
+            <strong>No trend watch data is available.</strong>
+            <p class="meta">Recent performance deltas will appear after the daily home model is built.</p>
+          </div>
+        {% endif %}
+      </article>
 
-  <section class="grid">
-    <article class="card">
-      <h2>Latest Analysis Snapshot</h2>
-      {% if analysis %}
-        <h3>{{ analysis.headline }}</h3>
-        <p class="meta">
-          Snapshot {{ analysis.snapshot_id }} · {{ analysis.snapshot_date }} · source run {{ analysis.source_run_id }}
-        </p>
-        <p>{{ analysis.dek }}</p>
-        <a class="button-link" href="/analysis">Read full snapshot</a>
-      {% else %}
-        <p>No deterministic analysis snapshot is available yet.</p>
-      {% endif %}
-    </article>
-
-    <article class="card">
-      <h2>Pipeline Health</h2>
-      {% if health.latest_successful_run %}
-        <p class="meta">Latest successful run: {{ health.latest_successful_run.dag_run_id }}</p>
-        <p class="meta">Finished: {{ health.latest_successful_run.finished_at_utc }}</p>
-        <p class="meta">Rows loaded: {{ health.latest_successful_run.rows_loaded }}</p>
-      {% else %}
-        <p>No successful pipeline run has been recorded.</p>
-      {% endif %}
-    </article>
+      <article class="card">
+        <div class="card-header">
+          <h2>Opportunity Board</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
+        </div>
+        {% if dashboard.opportunity %}
+          <div class="stack">
+            {% for item in dashboard.opportunity %}
+              <div>
+                <h3>{{ item.player_name }}</h3>
+                <p class="meta">{{ item.games_next_7d }} games · {{ item.back_to_backs_next_7d }} back-to-backs</p>
+                <p>Opportunity score {{ item.opportunity_score }}{% if item.next_opponent_abbr %} · next {{ item.next_opponent_abbr }}{% endif %}</p>
+              </div>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>Opportunity context is unavailable.</strong>
+            <p class="meta">Schedule-derived surfaces are missing, but rankings and recent signals are still usable.</p>
+          </div>
+        {% endif %}
+        <details class="explain">
+          <summary>How this works</summary>
+          <p>Opportunity is based on the next seven days after the selected day. If schedule context is missing, this panel degrades without collapsing the rest of the dashboard.</p>
+        </details>
+      </article>
+    </aside>
   </section>
 {% endblock %}

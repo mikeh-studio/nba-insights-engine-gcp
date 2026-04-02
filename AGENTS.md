@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository guidance for coding agents.
+Repository guidance for coding agents. For complete project context, see `CLAUDE.md`.
 
 ## Repository Purpose
 
@@ -56,3 +56,11 @@ If a full validation step cannot run, state exactly what was not verified.
 - Keep optional AI/report generation downstream and non-blocking.
 - Favor explicit configuration, reproducibility, and operational clarity.
 - Do not introduce tools or workflows that complicate the core pipeline without a concrete DE benefit.
+
+## Branch Hygiene
+
+- Prefer a fresh branch for each scoped change or PR.
+- Do not continue adding unrelated work to a branch after its PR has merged.
+- If a previously used branch has already merged to `main`, start from current `main` and cherry-pick or reapply only the intended commits.
+- Keep PRs narrowly scoped and avoid mixing data, app, infra, and docs changes unless they must ship together.
+- Delete merged branches when practical to keep the repo readable.
