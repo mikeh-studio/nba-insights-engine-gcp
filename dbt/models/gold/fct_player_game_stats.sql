@@ -4,6 +4,7 @@
 ) }}
 
 select
+    game_id,
     player_id,
     player_name,
     team_abbr,

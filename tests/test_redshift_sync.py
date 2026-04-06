@@ -19,6 +19,16 @@ def test_raw_schedule_redshift_columns_match_bigquery_schema():
     assert redshift_sync.get_raw_table_column_names("raw_schedule") == expected
 
 
+def test_raw_game_line_scores_redshift_columns_match_bigquery_schema():
+    expected = [field.name.lower() for field in pipeline.get_game_line_scores_schema()]
+    assert redshift_sync.get_raw_table_column_names("raw_game_line_scores") == expected
+
+
+def test_raw_player_reference_redshift_columns_match_bigquery_schema():
+    expected = [field.name.lower() for field in pipeline.get_player_reference_schema()]
+    assert redshift_sync.get_raw_table_column_names("raw_player_reference") == expected
+
+
 def test_missing_column_migration_is_additive():
     statements = redshift_sync._build_add_missing_column_ddls(
         "nba_bronze",

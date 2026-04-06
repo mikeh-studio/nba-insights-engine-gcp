@@ -18,6 +18,7 @@ with source_data as (
 ),
 deduped as (
     select
+        cast(game_id as {{ varchar_type() }}) as game_id,
         date(game_date) as game_date,
         cast(matchup as {{ varchar_type() }}) as matchup,
         upper(cast(wl as {{ varchar_type() }})) as wl,
@@ -79,6 +80,7 @@ deduped as (
     from source_data
 )
 select
+    game_id,
     game_date,
     matchup,
     wl,

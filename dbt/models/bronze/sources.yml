@@ -13,6 +13,8 @@ sources:
     tables:
       - name: raw_game_logs
         columns:
+          - name: game_id
+            tests: [not_null]
           - name: player_id
             tests: [not_null]
           - name: game_date
@@ -37,4 +39,24 @@ sources:
           - name: team_abbr
             tests: [not_null]
           - name: opponent_abbr
+            tests: [not_null]
+      - name: raw_game_line_scores
+        columns:
+          - name: game_id
+            tests: [not_null]
+          - name: team_id
+            tests: [not_null]
+          - name: team_abbr
+            tests: [not_null]
+          - name: season
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['2025-26']
+      - name: raw_player_reference
+        columns:
+          - name: player_id
+            tests: [not_null]
+          - name: player_name
             tests: [not_null]

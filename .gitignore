@@ -21,10 +21,12 @@ target/
 *.tfstate
 *.tfstate.backup
 infra/terraform-aws/env/
+infra/terraform-aws/env
 
 # Notebook and editor artifacts
 nba_api_executed.ipynb
 .ipynb_checkpoints/
+.context/
 
 # Linter/type-checker caches
 .mypy_cache/

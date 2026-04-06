@@ -1208,6 +1208,35 @@ class BigQueryWarehouseRepository:
           trend_player,
           trend_stat,
           trend_delta,
+          contribution_player_id,
+          contribution_player_name,
+          contribution_team_abbr,
+          contribution_opponent_abbr,
+          contribution_matchup,
+          contribution_player_pts,
+          contribution_team_pts,
+          contribution_opponent_team_pts,
+          contribution_player_points_share_of_team,
+          contribution_player_points_share_of_game,
+          contribution_scoring_margin,
+          contribution_team_pts_qtr1,
+          contribution_team_pts_qtr2,
+          contribution_team_pts_qtr3,
+          contribution_team_pts_qtr4,
+          contribution_team_pts_ot_total,
+          contribution_game_date,
+          context_player_id,
+          context_player_name,
+          context_team_abbr,
+          context_team_name,
+          context_position,
+          context_height,
+          context_weight,
+          context_roster_status,
+          context_season_exp,
+          context_draft_year,
+          context_draft_round,
+          context_draft_number,
           freshness_ts,
           source_run_id
         FROM {table}
@@ -1218,7 +1247,7 @@ class BigQueryWarehouseRepository:
         rows = self._query(
             sql, [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)]
         )
-        return rows[0] if rows else None
+        return build_analysis_payload(rows[0]) if rows else None
 
     def get_latest_successful_run(self) -> dict[str, Any] | None:
         table = f"`{self.settings.project_id}.{self.settings.metadata_dataset}.pipeline_run_log`"
@@ -1280,3 +1309,56 @@ class BigQueryWarehouseRepository:
         )
         payload["season"] = SUPPORTED_SEASON
         return payload
+
+
+def build_analysis_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+
+    item = dict(row)
+    item["score_contribution"] = {
+        "player_id": _to_int(row.get("contribution_player_id")),
+        "player_name": row.get("contribution_player_name"),
+        "team_abbr": row.get("contribution_team_abbr"),
+        "opponent_abbr": row.get("contribution_opponent_abbr"),
+        "matchup": row.get("contribution_matchup"),
+        "player_pts": _to_int(row.get("contribution_player_pts")),
+        "team_pts": _to_int(row.get("contribution_team_pts")),
+        "opponent_team_pts": _to_int(row.get("contribution_opponent_team_pts")),
+        "player_points_share_of_team": _to_float(
+            row.get("contribution_player_points_share_of_team")
+        ),
+        "player_points_share_of_game": _to_float(
+            row.get("contribution_player_points_share_of_game")
+        ),
+        "scoring_margin": _to_int(row.get("contribution_scoring_margin")),
+        "team_pts_qtr1": _to_int(row.get("contribution_team_pts_qtr1")),
+        "team_pts_qtr2": _to_int(row.get("contribution_team_pts_qtr2")),
+        "team_pts_qtr3": _to_int(row.get("contribution_team_pts_qtr3")),
+        "team_pts_qtr4": _to_int(row.get("contribution_team_pts_qtr4")),
+        "team_pts_ot_total": _to_int(row.get("contribution_team_pts_ot_total")),
+        "game_date": row.get("contribution_game_date"),
+    }
+    item["player_context"] = {
+        "player_id": _to_int(row.get("context_player_id")),
+        "player_name": row.get("context_player_name"),
+        "team_abbr": row.get("context_team_abbr"),
+        "team_name": row.get("context_team_name"),
+        "position": row.get("context_position"),
+        "height": row.get("context_height"),
+        "weight": _to_int(row.get("context_weight")),
+        "roster_status": (
+            row.get("context_roster_status")
+            if row.get("context_roster_status") in (True, False)
+            else (
+                str(row.get("context_roster_status")).lower() == "true"
+                if row.get("context_roster_status") not in (None, "")
+                else None
+            )
+        ),
+        "season_exp": _to_int(row.get("context_season_exp")),
+        "draft_year": row.get("context_draft_year"),
+        "draft_round": row.get("context_draft_round"),
+        "draft_number": row.get("context_draft_number"),
+    }
+    return item

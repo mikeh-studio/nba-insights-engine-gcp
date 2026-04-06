@@ -4,6 +4,7 @@
 ) }}
 
 select
+    game_id,
     game_date,
     matchup,
     wl,

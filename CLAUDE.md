@@ -20,7 +20,9 @@ The target direction is:
 - The repository keeps an archived exploratory notebook in `notebooks/nba_api.ipynb`.
 - Airflow orchestration lives in `dags/nba_analytics_dag.py`.
 - Shared business logic lives in `dags/nba_pipeline.py`.
-- The current flow is mostly Python-task driven and still reflects its notebook origin.
+- The current runtime ingests game logs, team line scores, player reference data, and schedule context into BigQuery bronze.
+- dbt now publishes scoring-contribution facts, richer player dimensions, and deterministic analysis snapshots for the app/API layer.
+- The flow is still Python-task heavy in orchestration, but the warehouse contract is materially more production-shaped than the original notebook path.
 
 **Target state**
 
@@ -79,12 +81,19 @@ Target model layers:
 Planned curated tables include:
 
 - `bronze.raw_game_logs`
+- `bronze.raw_game_line_scores`
+- `bronze.raw_player_reference`
 - `silver.stg_game_logs_clean`
+- `silver.stg_game_line_scores_clean`
+- `silver.stg_player_reference_clean`
 - `silver.int_player_game_enriched`
 - `gold.fct_player_game_stats`
+- `gold.fct_team_game_scores`
+- `gold.fct_player_scoring_contribution`
 - `gold.dim_player`
 - `gold.player_trends`
 - `gold.daily_leaderboard`
+- `gold.analysis_snapshots`
 
 Keep the bronze/raw merge keyed on `(player_id, game_date, matchup)` unless there is a source-level reason to redefine the business key.
 
@@ -93,7 +102,8 @@ Keep the bronze/raw merge keyed on `(player_id, game_date, matchup)` unless ther
 The intended ingestion pattern is:
 
 - track a persisted watermark in BigQuery metadata tables
-- extract only new or recently replayed game dates
+- extract new or recently replayed game dates for player logs
+- derive replay-window `game_id`s for line-score refreshes
 - allow a small replay buffer for late corrections
 - write landed files to GCS
 - load to staging and MERGE idempotently into bronze/raw tables
@@ -175,11 +185,16 @@ airflow standalone
 Target-state validation commands to prefer once the corresponding pieces exist:
 
 ```bash
-pytest
-dbt parse
-dbt test
+python -m compileall dags app tests
+PYTHONPATH=. pytest
+dbt parse --project-dir . --profiles-dir dbt/profiles
+dbt test --project-dir . --profiles-dir dbt/profiles --target dev
 terraform plan
 ```
+
+Current local caveat:
+
+- `dbt test` still requires a real BigQuery-enabled project and working GCP auth. The profile fallback `local-project` is not sufficient.
 
 ## Working Guidance
 

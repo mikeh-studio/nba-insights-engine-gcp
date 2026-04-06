@@ -14,6 +14,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from google.cloud import bigquery, storage
+from nba_api.stats.endpoints import boxscoresummaryv2
+from nba_api.stats.endpoints import commonplayerinfo
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.endpoints import scheduleleaguev2
 from nba_api.stats.static import players
@@ -275,6 +277,7 @@ def get_player_game_log(
 ) -> pd.DataFrame:
     """Get normalized game logs for a single player with retry logic."""
     cols = [
+        "Game_ID",
         "GAME_DATE",
         "MATCHUP",
         "WL",
@@ -310,6 +313,7 @@ def get_player_game_log(
                 raise ValueError(f"Missing expected columns: {missing_cols}")
 
             out = df[cols].copy()
+            out = out.rename(columns={"Game_ID": "GAME_ID"})
             out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], errors="coerce")
             out = out.dropna(subset=["GAME_DATE"])
 
@@ -424,6 +428,251 @@ def get_all_player_game_logs(
     return all_game_logs.reset_index(drop=True)
 
 
+def get_game_line_scores(
+    game_id: str,
+    *,
+    season: str = SUPPORTED_SEASON,
+    retries: int = 3,
+    delay: float = 0.8,
+) -> pd.DataFrame:
+    """Get normalized team line scores for a single game."""
+    line_score_fields = [
+        "GAME_DATE_EST",
+        "GAME_ID",
+        "TEAM_ID",
+        "TEAM_ABBREVIATION",
+        "TEAM_CITY_NAME",
+        "TEAM_NICKNAME",
+        "TEAM_WINS_LOSSES",
+        "PTS_QTR1",
+        "PTS_QTR2",
+        "PTS_QTR3",
+        "PTS_QTR4",
+        "PTS_OT1",
+        "PTS_OT2",
+        "PTS_OT3",
+        "PTS_OT4",
+        "PTS_OT5",
+        "PTS_OT6",
+        "PTS_OT7",
+        "PTS_OT8",
+        "PTS_OT9",
+        "PTS_OT10",
+        "PTS",
+    ]
+
+    empty = pd.DataFrame(columns=[field.name for field in get_game_line_scores_schema()])
+
+    for attempt in range(1, retries + 1):
+        try:
+            summary = boxscoresummaryv2.BoxScoreSummaryV2(game_id=game_id)
+            available = summary.get_available_data()
+            if "LineScore" not in available:
+                return empty.copy()
+            line_score = summary.get_data_frames()[available.index("LineScore")].copy()
+            missing_cols = [c for c in line_score_fields if c not in line_score.columns]
+            if missing_cols:
+                raise ValueError(f"Missing expected line score columns: {missing_cols}")
+
+            out = line_score[line_score_fields].copy()
+            out = out.rename(
+                columns={
+                    "GAME_DATE_EST": "GAME_DATE",
+                    "TEAM_ABBREVIATION": "TEAM_ABBR",
+                }
+            )
+            out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], errors="coerce").dt.date
+            out = out.dropna(subset=["GAME_DATE", "GAME_ID", "TEAM_ID"]).copy()
+            out["TEAM_ABBR"] = out["TEAM_ABBR"].astype("string").str.upper()
+            out["SEASON"] = season
+            numeric_cols = ["TEAM_ID", "PTS_QTR1", "PTS_QTR2", "PTS_QTR3", "PTS_QTR4"]
+            numeric_cols.extend([f"PTS_OT{idx}" for idx in range(1, 11)])
+            numeric_cols.append("PTS")
+            for col in numeric_cols:
+                out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
+            out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
+            return out[[field.name for field in get_game_line_scores_schema()]]
+        except Exception:
+            if attempt == retries:
+                logger.exception("Failed game_id=%s after %s attempts", game_id, retries)
+                return empty.copy()
+            sleep_seconds = delay * attempt
+            logger.warning(
+                "Retrying game_id=%s attempt=%s/%s in %.1fs",
+                game_id,
+                attempt,
+                retries,
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
+
+    return empty.copy()
+
+
+def get_all_game_line_scores(
+    game_ids: Iterable[Any],
+    *,
+    season: str = SUPPORTED_SEASON,
+    delay: float = 0.4,
+) -> pd.DataFrame:
+    """Fetch team line scores for many games with rate limiting."""
+    seen: set[str] = set()
+    normalized_ids: list[str] = []
+    for value in game_ids:
+        if value in (None, ""):
+            continue
+        normalized = str(value)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_ids.append(normalized)
+
+    all_scores = []
+    for idx, game_id in enumerate(normalized_ids, start=1):
+        logger.info("Fetching line score %s/%s: %s", idx, len(normalized_ids), game_id)
+        line_scores = get_game_line_scores(game_id, season=season)
+        if not line_scores.empty:
+            all_scores.append(line_scores)
+        time.sleep(delay)
+
+    if not all_scores:
+        return pd.DataFrame(columns=[field.name for field in get_game_line_scores_schema()])
+
+    combined = pd.concat(all_scores, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["GAME_ID", "TEAM_ID"]).copy()
+    combined = combined.sort_values(["GAME_DATE", "GAME_ID", "TEAM_ID"]).reset_index(
+        drop=True
+    )
+    return combined[[field.name for field in get_game_line_scores_schema()]]
+
+
+def get_player_reference(
+    player_id: int,
+    *,
+    retries: int = 3,
+    delay: float = 0.8,
+) -> pd.DataFrame:
+    """Get normalized player reference attributes for a single player."""
+    expected_cols = [
+        "PERSON_ID",
+        "FIRST_NAME",
+        "LAST_NAME",
+        "DISPLAY_FIRST_LAST",
+        "PLAYER_SLUG",
+        "BIRTHDATE",
+        "SCHOOL",
+        "COUNTRY",
+        "LAST_AFFILIATION",
+        "HEIGHT",
+        "WEIGHT",
+        "SEASON_EXP",
+        "JERSEY",
+        "POSITION",
+        "ROSTERSTATUS",
+        "TEAM_ID",
+        "TEAM_NAME",
+        "TEAM_ABBREVIATION",
+        "TEAM_CODE",
+        "TEAM_CITY",
+        "FROM_YEAR",
+        "TO_YEAR",
+        "DRAFT_YEAR",
+        "DRAFT_ROUND",
+        "DRAFT_NUMBER",
+    ]
+    empty = pd.DataFrame(columns=[field.name for field in get_player_reference_schema()])
+
+    for attempt in range(1, retries + 1):
+        try:
+            info = commonplayerinfo.CommonPlayerInfo(player_id=player_id)
+            available = info.get_available_data()
+            if "CommonPlayerInfo" not in available:
+                return empty.copy()
+            profile = info.get_data_frames()[available.index("CommonPlayerInfo")].copy()
+            if profile.empty:
+                return empty.copy()
+            missing_cols = [c for c in expected_cols if c not in profile.columns]
+            if missing_cols:
+                raise ValueError(
+                    f"Missing expected player reference columns: {missing_cols}"
+                )
+
+            out = profile[expected_cols].head(1).copy()
+            out = out.rename(
+                columns={
+                    "PERSON_ID": "PLAYER_ID",
+                    "DISPLAY_FIRST_LAST": "PLAYER_NAME",
+                    "TEAM_ABBREVIATION": "TEAM_ABBR",
+                    "ROSTERSTATUS": "ROSTER_STATUS",
+                }
+            )
+            out["BIRTHDATE"] = pd.to_datetime(out["BIRTHDATE"], errors="coerce").dt.date
+            for col in (
+                "PLAYER_ID",
+                "WEIGHT",
+                "SEASON_EXP",
+                "TEAM_ID",
+                "FROM_YEAR",
+                "TO_YEAR",
+            ):
+                out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+            out["PLAYER_ID"] = out["PLAYER_ID"].fillna(player_id).astype("Int64")
+            out["TEAM_ABBR"] = out["TEAM_ABBR"].astype("string").str.upper()
+            out["ROSTER_STATUS"] = pd.to_numeric(
+                out["ROSTER_STATUS"], errors="coerce"
+            ).fillna(0).astype(int).astype(bool)
+            out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
+            return out[[field.name for field in get_player_reference_schema()]]
+        except Exception:
+            if attempt == retries:
+                logger.exception(
+                    "Failed player reference player_id=%s after %s attempts",
+                    player_id,
+                    retries,
+                )
+                return empty.copy()
+            sleep_seconds = delay * attempt
+            logger.warning(
+                "Retrying player reference player_id=%s attempt=%s/%s in %.1fs",
+                player_id,
+                attempt,
+                retries,
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
+
+    return empty.copy()
+
+
+def get_all_player_references(
+    player_list: Iterable[dict],
+    *,
+    delay: float = 0.4,
+) -> pd.DataFrame:
+    """Fetch player reference data for many players with rate limiting."""
+    all_profiles = []
+    player_list = list(player_list)
+
+    for idx, player in enumerate(player_list, start=1):
+        player_id = player["id"]
+        player_name = player["full_name"]
+        logger.info(
+            "Fetching player reference %s/%s: %s", idx, len(player_list), player_name
+        )
+        profile = get_player_reference(player_id)
+        if not profile.empty:
+            all_profiles.append(profile)
+        time.sleep(delay)
+
+    if not all_profiles:
+        return pd.DataFrame(columns=[field.name for field in get_player_reference_schema()])
+
+    combined = pd.concat(all_profiles, ignore_index=True)
+    combined = combined.drop_duplicates(subset=["PLAYER_ID"]).copy()
+    combined = combined.sort_values(["PLAYER_ID"]).reset_index(drop=True)
+    return combined[[field.name for field in get_player_reference_schema()]]
+
+
 def upload_df_to_gcs(
     df: pd.DataFrame, project_id: str, bucket_name: str, destination_blob_name: str
 ) -> str:
@@ -447,6 +696,7 @@ def upload_df_to_gcs(
 def get_game_logs_schema() -> List[bigquery.SchemaField]:
     """Return the BigQuery schema for game logs."""
     return [
+        bigquery.SchemaField("GAME_ID", "STRING"),
         bigquery.SchemaField("GAME_DATE", "DATE"),
         bigquery.SchemaField("MATCHUP", "STRING"),
         bigquery.SchemaField("WL", "STRING"),
@@ -474,6 +724,68 @@ def get_game_logs_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
         bigquery.SchemaField("PLAYER_ID", "INTEGER"),
         bigquery.SchemaField("PLAYER_NAME", "STRING"),
+    ]
+
+
+def get_game_line_scores_schema() -> List[bigquery.SchemaField]:
+    """Return the BigQuery schema for team line scores."""
+    return [
+        bigquery.SchemaField("GAME_DATE", "DATE"),
+        bigquery.SchemaField("GAME_ID", "STRING"),
+        bigquery.SchemaField("SEASON", "STRING"),
+        bigquery.SchemaField("TEAM_ID", "INTEGER"),
+        bigquery.SchemaField("TEAM_ABBR", "STRING"),
+        bigquery.SchemaField("TEAM_CITY_NAME", "STRING"),
+        bigquery.SchemaField("TEAM_NICKNAME", "STRING"),
+        bigquery.SchemaField("TEAM_WINS_LOSSES", "STRING"),
+        bigquery.SchemaField("PTS_QTR1", "INTEGER"),
+        bigquery.SchemaField("PTS_QTR2", "INTEGER"),
+        bigquery.SchemaField("PTS_QTR3", "INTEGER"),
+        bigquery.SchemaField("PTS_QTR4", "INTEGER"),
+        bigquery.SchemaField("PTS_OT1", "INTEGER"),
+        bigquery.SchemaField("PTS_OT2", "INTEGER"),
+        bigquery.SchemaField("PTS_OT3", "INTEGER"),
+        bigquery.SchemaField("PTS_OT4", "INTEGER"),
+        bigquery.SchemaField("PTS_OT5", "INTEGER"),
+        bigquery.SchemaField("PTS_OT6", "INTEGER"),
+        bigquery.SchemaField("PTS_OT7", "INTEGER"),
+        bigquery.SchemaField("PTS_OT8", "INTEGER"),
+        bigquery.SchemaField("PTS_OT9", "INTEGER"),
+        bigquery.SchemaField("PTS_OT10", "INTEGER"),
+        bigquery.SchemaField("PTS", "INTEGER"),
+        bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
+    ]
+
+
+def get_player_reference_schema() -> List[bigquery.SchemaField]:
+    """Return the BigQuery schema for player reference data."""
+    return [
+        bigquery.SchemaField("PLAYER_ID", "INTEGER"),
+        bigquery.SchemaField("FIRST_NAME", "STRING"),
+        bigquery.SchemaField("LAST_NAME", "STRING"),
+        bigquery.SchemaField("PLAYER_NAME", "STRING"),
+        bigquery.SchemaField("PLAYER_SLUG", "STRING"),
+        bigquery.SchemaField("BIRTHDATE", "DATE"),
+        bigquery.SchemaField("SCHOOL", "STRING"),
+        bigquery.SchemaField("COUNTRY", "STRING"),
+        bigquery.SchemaField("LAST_AFFILIATION", "STRING"),
+        bigquery.SchemaField("HEIGHT", "STRING"),
+        bigquery.SchemaField("WEIGHT", "INTEGER"),
+        bigquery.SchemaField("SEASON_EXP", "INTEGER"),
+        bigquery.SchemaField("JERSEY", "STRING"),
+        bigquery.SchemaField("POSITION", "STRING"),
+        bigquery.SchemaField("ROSTER_STATUS", "BOOLEAN"),
+        bigquery.SchemaField("TEAM_ID", "INTEGER"),
+        bigquery.SchemaField("TEAM_NAME", "STRING"),
+        bigquery.SchemaField("TEAM_ABBR", "STRING"),
+        bigquery.SchemaField("TEAM_CODE", "STRING"),
+        bigquery.SchemaField("TEAM_CITY", "STRING"),
+        bigquery.SchemaField("FROM_YEAR", "INTEGER"),
+        bigquery.SchemaField("TO_YEAR", "INTEGER"),
+        bigquery.SchemaField("DRAFT_YEAR", "STRING"),
+        bigquery.SchemaField("DRAFT_ROUND", "STRING"),
+        bigquery.SchemaField("DRAFT_NUMBER", "STRING"),
+        bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
     ]
 
 
@@ -602,6 +914,116 @@ def run_data_quality_checks(
     return dq
 
 
+def run_game_line_score_quality_checks(
+    bq_client: bigquery.Client,
+    staging_table: str,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> dict:
+    """Run data quality checks on game line score staging rows."""
+    dq_query = f"""
+    WITH base AS (
+      SELECT *
+      FROM `{staging_table}`
+    ),
+    dups AS (
+      SELECT COUNT(*) AS duplicate_keys
+      FROM (
+        SELECT game_id, team_id, COUNT(*) AS cnt
+        FROM base
+        GROUP BY game_id, team_id
+        HAVING COUNT(*) > 1
+      )
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total_rows,
+      (SELECT COUNT(*) FROM base WHERE game_id IS NULL OR team_id IS NULL OR team_abbr IS NULL) AS null_key_rows,
+      (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
+      (SELECT COUNT(*) FROM base WHERE season != @season OR season IS NULL) AS invalid_season_rows,
+      (SELECT COUNT(*) FROM base WHERE pts IS NULL OR pts < 0) AS invalid_points_rows
+    """
+    dq = (
+        bq_client.query(
+            dq_query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("season", "STRING", season),
+                ]
+            ),
+        )
+        .to_dataframe()
+        .iloc[0]
+        .to_dict()
+    )
+    if dq["total_rows"] == 0:
+        raise ValueError("DQ failed: game line score staging table has zero rows")
+    if dq["null_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['null_key_rows']} game line score rows with null keys"
+        )
+    if dq["duplicate_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['duplicate_key_rows']} duplicate game line score rows"
+        )
+    if dq["invalid_season_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_season_rows']} game line score rows outside season {season}"
+        )
+    if dq["invalid_points_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_points_rows']} game line score rows with invalid points"
+        )
+    return dq
+
+
+def run_player_reference_quality_checks(
+    bq_client: bigquery.Client,
+    staging_table: str,
+) -> dict:
+    """Run data quality checks on player reference staging rows."""
+    dq_query = f"""
+    WITH base AS (
+      SELECT *
+      FROM `{staging_table}`
+    ),
+    dups AS (
+      SELECT COUNT(*) AS duplicate_keys
+      FROM (
+        SELECT player_id, COUNT(*) AS cnt
+        FROM base
+        GROUP BY player_id
+        HAVING COUNT(*) > 1
+      )
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total_rows,
+      (SELECT COUNT(*) FROM base WHERE player_id IS NULL) AS null_key_rows,
+      (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
+      (SELECT COUNT(*) FROM base WHERE player_name IS NULL OR trim(player_name) = '') AS missing_name_rows
+    """
+    dq = (
+        bq_client.query(dq_query)
+        .to_dataframe()
+        .iloc[0]
+        .to_dict()
+    )
+    if dq["total_rows"] == 0:
+        raise ValueError("DQ failed: player reference staging table has zero rows")
+    if dq["null_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['null_key_rows']} player reference rows with null player_id"
+        )
+    if dq["duplicate_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['duplicate_key_rows']} duplicate player reference rows"
+        )
+    if dq["missing_name_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['missing_name_rows']} player reference rows without a player_name"
+        )
+    return dq
+
+
 def validate_merge_reconciliation(
     *,
     domain: str,
@@ -651,6 +1073,7 @@ def create_and_merge_raw_table(
     """Create raw table if needed and MERGE staging data into it."""
     create_ddl = f"""
     CREATE TABLE IF NOT EXISTS `{raw_table}` (
+      game_id STRING,
       game_date DATE,
       matchup STRING,
       wl STRING,
@@ -689,6 +1112,8 @@ def create_and_merge_raw_table(
       COUNTIF(
         t.player_id IS NOT NULL
         AND (
+          COALESCE(t.game_id, '') != COALESCE(s.game_id, '')
+          OR
           COALESCE(t.wl, '') != COALESCE(s.wl, '')
           OR COALESCE(t.min, 0) != COALESCE(s.min, 0)
           OR COALESCE(t.fgm, 0) != COALESCE(s.fgm, 0)
@@ -728,6 +1153,8 @@ def create_and_merge_raw_table(
     AND T.game_date = S.game_date
     AND T.matchup = S.matchup
     WHEN MATCHED AND (
+      COALESCE(T.game_id, '') != COALESCE(S.game_id, '')
+      OR
       COALESCE(T.wl, '') != COALESCE(S.wl, '')
       OR COALESCE(T.min, 0) != COALESCE(S.min, 0)
       OR COALESCE(T.fgm, 0) != COALESCE(S.fgm, 0)
@@ -753,6 +1180,7 @@ def create_and_merge_raw_table(
       OR COALESCE(T.player_name, '') != COALESCE(S.player_name, '')
     ) THEN
       UPDATE SET
+        game_id = S.game_id,
         wl = S.wl,
         min = S.min,
         fgm = S.fgm,
@@ -778,16 +1206,19 @@ def create_and_merge_raw_table(
         ingested_at_utc = S.ingested_at_utc,
         player_name = S.player_name
     WHEN NOT MATCHED THEN
-      INSERT (game_date, matchup, wl, min, fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
+      INSERT (game_id, game_date, matchup, wl, min, fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
               ftm, fta, ft_pct, oreb, dreb, pts, reb, ast, stl, blk, tov, pf, plus_minus,
               season, ingested_at_utc, player_id, player_name)
-      VALUES (S.game_date, S.matchup, S.wl, S.min, S.fgm, S.fga, S.fg_pct, S.fg3m, S.fg3a,
+      VALUES (S.game_id, S.game_date, S.matchup, S.wl, S.min, S.fgm, S.fga, S.fg_pct, S.fg3m, S.fg3a,
               S.fg3_pct, S.ftm, S.fta, S.ft_pct, S.oreb, S.dreb, S.pts, S.reb, S.ast, S.stl,
               S.blk, S.tov, S.pf, S.plus_minus, S.season, S.ingested_at_utc, S.player_id,
               S.player_name)
     """
 
     bq_client.query(create_ddl).result()
+    bq_client.query(
+        f"ALTER TABLE `{raw_table}` ADD COLUMN IF NOT EXISTS game_id STRING"
+    ).result()
     pre_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
         .to_dataframe()
@@ -809,6 +1240,275 @@ def create_and_merge_raw_table(
     }
     logger.info("MERGE completed: %s", result)
     return result
+
+
+def create_and_merge_game_line_scores_table(
+    bq_client: bigquery.Client, staging_table: str, raw_table: str
+) -> Dict[str, int]:
+    """Create line score raw table if needed and MERGE staging data into it."""
+    create_ddl = f"""
+    CREATE TABLE IF NOT EXISTS `{raw_table}` (
+      game_date DATE,
+      game_id STRING,
+      season STRING,
+      team_id INT64,
+      team_abbr STRING,
+      team_city_name STRING,
+      team_nickname STRING,
+      team_wins_losses STRING,
+      pts_qtr1 INT64,
+      pts_qtr2 INT64,
+      pts_qtr3 INT64,
+      pts_qtr4 INT64,
+      pts_ot1 INT64,
+      pts_ot2 INT64,
+      pts_ot3 INT64,
+      pts_ot4 INT64,
+      pts_ot5 INT64,
+      pts_ot6 INT64,
+      pts_ot7 INT64,
+      pts_ot8 INT64,
+      pts_ot9 INT64,
+      pts_ot10 INT64,
+      pts INT64,
+      ingested_at_utc TIMESTAMP
+    )
+    PARTITION BY game_date
+    CLUSTER BY game_id, team_id
+    """
+    change_predicate = """
+      COALESCE(T.game_date, DATE '1970-01-01') != COALESCE(S.game_date, DATE '1970-01-01')
+      OR COALESCE(T.season, '') != COALESCE(S.season, '')
+      OR COALESCE(T.team_abbr, '') != COALESCE(S.team_abbr, '')
+      OR COALESCE(T.team_city_name, '') != COALESCE(S.team_city_name, '')
+      OR COALESCE(T.team_nickname, '') != COALESCE(S.team_nickname, '')
+      OR COALESCE(T.team_wins_losses, '') != COALESCE(S.team_wins_losses, '')
+      OR COALESCE(T.pts_qtr1, 0) != COALESCE(S.pts_qtr1, 0)
+      OR COALESCE(T.pts_qtr2, 0) != COALESCE(S.pts_qtr2, 0)
+      OR COALESCE(T.pts_qtr3, 0) != COALESCE(S.pts_qtr3, 0)
+      OR COALESCE(T.pts_qtr4, 0) != COALESCE(S.pts_qtr4, 0)
+      OR COALESCE(T.pts_ot1, 0) != COALESCE(S.pts_ot1, 0)
+      OR COALESCE(T.pts_ot2, 0) != COALESCE(S.pts_ot2, 0)
+      OR COALESCE(T.pts_ot3, 0) != COALESCE(S.pts_ot3, 0)
+      OR COALESCE(T.pts_ot4, 0) != COALESCE(S.pts_ot4, 0)
+      OR COALESCE(T.pts_ot5, 0) != COALESCE(S.pts_ot5, 0)
+      OR COALESCE(T.pts_ot6, 0) != COALESCE(S.pts_ot6, 0)
+      OR COALESCE(T.pts_ot7, 0) != COALESCE(S.pts_ot7, 0)
+      OR COALESCE(T.pts_ot8, 0) != COALESCE(S.pts_ot8, 0)
+      OR COALESCE(T.pts_ot9, 0) != COALESCE(S.pts_ot9, 0)
+      OR COALESCE(T.pts_ot10, 0) != COALESCE(S.pts_ot10, 0)
+      OR COALESCE(T.pts, 0) != COALESCE(S.pts, 0)
+    """
+    stats_sql = f"""
+    SELECT
+      COUNTIF(t.game_id IS NULL) AS inserted,
+      COUNTIF(t.game_id IS NOT NULL AND ({change_predicate.replace('T.', 't.').replace('S.', 's.')})) AS updated
+    FROM `{staging_table}` s
+    LEFT JOIN `{raw_table}` t
+      ON t.game_id = s.game_id
+     AND t.team_id = s.team_id
+    """
+    merge_sql = f"""
+    MERGE `{raw_table}` T
+    USING `{staging_table}` S
+    ON T.game_id = S.game_id
+    AND T.team_id = S.team_id
+    WHEN MATCHED AND ({change_predicate}) THEN
+      UPDATE SET
+        game_date = S.game_date,
+        season = S.season,
+        team_abbr = S.team_abbr,
+        team_city_name = S.team_city_name,
+        team_nickname = S.team_nickname,
+        team_wins_losses = S.team_wins_losses,
+        pts_qtr1 = S.pts_qtr1,
+        pts_qtr2 = S.pts_qtr2,
+        pts_qtr3 = S.pts_qtr3,
+        pts_qtr4 = S.pts_qtr4,
+        pts_ot1 = S.pts_ot1,
+        pts_ot2 = S.pts_ot2,
+        pts_ot3 = S.pts_ot3,
+        pts_ot4 = S.pts_ot4,
+        pts_ot5 = S.pts_ot5,
+        pts_ot6 = S.pts_ot6,
+        pts_ot7 = S.pts_ot7,
+        pts_ot8 = S.pts_ot8,
+        pts_ot9 = S.pts_ot9,
+        pts_ot10 = S.pts_ot10,
+        pts = S.pts,
+        ingested_at_utc = S.ingested_at_utc
+    WHEN NOT MATCHED THEN
+      INSERT (
+        game_date, game_id, season, team_id, team_abbr, team_city_name, team_nickname,
+        team_wins_losses, pts_qtr1, pts_qtr2, pts_qtr3, pts_qtr4, pts_ot1, pts_ot2,
+        pts_ot3, pts_ot4, pts_ot5, pts_ot6, pts_ot7, pts_ot8, pts_ot9, pts_ot10, pts,
+        ingested_at_utc
+      )
+      VALUES (
+        S.game_date, S.game_id, S.season, S.team_id, S.team_abbr, S.team_city_name,
+        S.team_nickname, S.team_wins_losses, S.pts_qtr1, S.pts_qtr2, S.pts_qtr3,
+        S.pts_qtr4, S.pts_ot1, S.pts_ot2, S.pts_ot3, S.pts_ot4, S.pts_ot5, S.pts_ot6,
+        S.pts_ot7, S.pts_ot8, S.pts_ot9, S.pts_ot10, S.pts, S.ingested_at_utc
+      )
+    """
+
+    bq_client.query(create_ddl).result()
+    pre_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    stats = bq_client.query(stats_sql).to_dataframe().iloc[0].to_dict()
+    bq_client.query(merge_sql).result()
+    post_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    return {
+        "pre_count": int(pre_count),
+        "post_count": int(post_count),
+        "inserted": int(stats["inserted"]),
+        "updated": int(stats["updated"]),
+    }
+
+
+def create_and_merge_player_reference_table(
+    bq_client: bigquery.Client, staging_table: str, raw_table: str
+) -> Dict[str, int]:
+    """Create player reference raw table if needed and MERGE staging data into it."""
+    create_ddl = f"""
+    CREATE TABLE IF NOT EXISTS `{raw_table}` (
+      player_id INT64,
+      first_name STRING,
+      last_name STRING,
+      player_name STRING,
+      player_slug STRING,
+      birthdate DATE,
+      school STRING,
+      country STRING,
+      last_affiliation STRING,
+      height STRING,
+      weight INT64,
+      season_exp INT64,
+      jersey STRING,
+      position STRING,
+      roster_status BOOL,
+      team_id INT64,
+      team_name STRING,
+      team_abbr STRING,
+      team_code STRING,
+      team_city STRING,
+      from_year INT64,
+      to_year INT64,
+      draft_year STRING,
+      draft_round STRING,
+      draft_number STRING,
+      ingested_at_utc TIMESTAMP
+    )
+    CLUSTER BY player_id
+    """
+    change_predicate = """
+      COALESCE(T.first_name, '') != COALESCE(S.first_name, '')
+      OR COALESCE(T.last_name, '') != COALESCE(S.last_name, '')
+      OR COALESCE(T.player_name, '') != COALESCE(S.player_name, '')
+      OR COALESCE(T.player_slug, '') != COALESCE(S.player_slug, '')
+      OR COALESCE(T.birthdate, DATE '1970-01-01') != COALESCE(S.birthdate, DATE '1970-01-01')
+      OR COALESCE(T.school, '') != COALESCE(S.school, '')
+      OR COALESCE(T.country, '') != COALESCE(S.country, '')
+      OR COALESCE(T.last_affiliation, '') != COALESCE(S.last_affiliation, '')
+      OR COALESCE(T.height, '') != COALESCE(S.height, '')
+      OR COALESCE(T.weight, -1) != COALESCE(S.weight, -1)
+      OR COALESCE(T.season_exp, -1) != COALESCE(S.season_exp, -1)
+      OR COALESCE(T.jersey, '') != COALESCE(S.jersey, '')
+      OR COALESCE(T.position, '') != COALESCE(S.position, '')
+      OR COALESCE(T.roster_status, FALSE) != COALESCE(S.roster_status, FALSE)
+      OR COALESCE(T.team_id, -1) != COALESCE(S.team_id, -1)
+      OR COALESCE(T.team_name, '') != COALESCE(S.team_name, '')
+      OR COALESCE(T.team_abbr, '') != COALESCE(S.team_abbr, '')
+      OR COALESCE(T.team_code, '') != COALESCE(S.team_code, '')
+      OR COALESCE(T.team_city, '') != COALESCE(S.team_city, '')
+      OR COALESCE(T.from_year, -1) != COALESCE(S.from_year, -1)
+      OR COALESCE(T.to_year, -1) != COALESCE(S.to_year, -1)
+      OR COALESCE(T.draft_year, '') != COALESCE(S.draft_year, '')
+      OR COALESCE(T.draft_round, '') != COALESCE(S.draft_round, '')
+      OR COALESCE(T.draft_number, '') != COALESCE(S.draft_number, '')
+    """
+    stats_sql = f"""
+    SELECT
+      COUNTIF(t.player_id IS NULL) AS inserted,
+      COUNTIF(t.player_id IS NOT NULL AND ({change_predicate.replace('T.', 't.').replace('S.', 's.')})) AS updated
+    FROM `{staging_table}` s
+    LEFT JOIN `{raw_table}` t
+      ON t.player_id = s.player_id
+    """
+    merge_sql = f"""
+    MERGE `{raw_table}` T
+    USING `{staging_table}` S
+    ON T.player_id = S.player_id
+    WHEN MATCHED AND ({change_predicate}) THEN
+      UPDATE SET
+        first_name = S.first_name,
+        last_name = S.last_name,
+        player_name = S.player_name,
+        player_slug = S.player_slug,
+        birthdate = S.birthdate,
+        school = S.school,
+        country = S.country,
+        last_affiliation = S.last_affiliation,
+        height = S.height,
+        weight = S.weight,
+        season_exp = S.season_exp,
+        jersey = S.jersey,
+        position = S.position,
+        roster_status = S.roster_status,
+        team_id = S.team_id,
+        team_name = S.team_name,
+        team_abbr = S.team_abbr,
+        team_code = S.team_code,
+        team_city = S.team_city,
+        from_year = S.from_year,
+        to_year = S.to_year,
+        draft_year = S.draft_year,
+        draft_round = S.draft_round,
+        draft_number = S.draft_number,
+        ingested_at_utc = S.ingested_at_utc
+    WHEN NOT MATCHED THEN
+      INSERT (
+        player_id, first_name, last_name, player_name, player_slug, birthdate,
+        school, country, last_affiliation, height, weight, season_exp, jersey,
+        position, roster_status, team_id, team_name, team_abbr, team_code,
+        team_city, from_year, to_year, draft_year, draft_round, draft_number,
+        ingested_at_utc
+      )
+      VALUES (
+        S.player_id, S.first_name, S.last_name, S.player_name, S.player_slug,
+        S.birthdate, S.school, S.country, S.last_affiliation, S.height, S.weight,
+        S.season_exp, S.jersey, S.position, S.roster_status, S.team_id, S.team_name,
+        S.team_abbr, S.team_code, S.team_city, S.from_year, S.to_year, S.draft_year,
+        S.draft_round, S.draft_number, S.ingested_at_utc
+      )
+    """
+
+    bq_client.query(create_ddl).result()
+    pre_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    stats = bq_client.query(stats_sql).to_dataframe().iloc[0].to_dict()
+    bq_client.query(merge_sql).result()
+    post_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    return {
+        "pre_count": int(pre_count),
+        "post_count": int(post_count),
+        "inserted": int(stats["inserted"]),
+        "updated": int(stats["updated"]),
+    }
 
 
 def get_schedule_schema() -> List[bigquery.SchemaField]:
@@ -1074,6 +1774,35 @@ def create_analysis_snapshot_table(
       trend_player STRING,
       trend_stat STRING,
       trend_delta FLOAT64,
+      contribution_player_id INT64,
+      contribution_player_name STRING,
+      contribution_team_abbr STRING,
+      contribution_opponent_abbr STRING,
+      contribution_matchup STRING,
+      contribution_player_pts INT64,
+      contribution_team_pts INT64,
+      contribution_opponent_team_pts INT64,
+      contribution_player_points_share_of_team FLOAT64,
+      contribution_player_points_share_of_game FLOAT64,
+      contribution_scoring_margin INT64,
+      contribution_team_pts_qtr1 INT64,
+      contribution_team_pts_qtr2 INT64,
+      contribution_team_pts_qtr3 INT64,
+      contribution_team_pts_qtr4 INT64,
+      contribution_team_pts_ot_total INT64,
+      contribution_game_date DATE,
+      context_player_id INT64,
+      context_player_name STRING,
+      context_team_abbr STRING,
+      context_team_name STRING,
+      context_position STRING,
+      context_height STRING,
+      context_weight INT64,
+      context_roster_status BOOL,
+      context_season_exp INT64,
+      context_draft_year STRING,
+      context_draft_round STRING,
+      context_draft_number STRING,
       freshness_ts TIMESTAMP,
       source_run_id STRING
     )
@@ -1081,6 +1810,38 @@ def create_analysis_snapshot_table(
     CLUSTER BY season
     """
     bq_client.query(ddl).result()
+    for column_ddl in [
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_player_id INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_player_name STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_abbr STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_opponent_abbr STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_matchup STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_player_pts INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_opponent_team_pts INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_player_points_share_of_team FLOAT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_player_points_share_of_game FLOAT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_scoring_margin INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts_qtr1 INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts_qtr2 INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts_qtr3 INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts_qtr4 INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_team_pts_ot_total INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS contribution_game_date DATE",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_player_id INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_player_name STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_team_abbr STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_team_name STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_position STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_height STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_weight INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_roster_status BOOL",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_season_exp INT64",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_draft_year STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_draft_round STRING",
+        "ALTER TABLE `{table}` ADD COLUMN IF NOT EXISTS context_draft_number STRING",
+    ]:
+        bq_client.query(column_ddl.format(table=table_id)).result()
 
 
 def build_analysis_snapshot_record(
@@ -1090,6 +1851,8 @@ def build_analysis_snapshot_record(
     trends: pd.DataFrame,
     recommendations: Optional[pd.DataFrame] = None,
     rankings: Optional[pd.DataFrame] = None,
+    score_contribution: Optional[pd.DataFrame] = None,
+    player_context: Optional[pd.DataFrame] = None,
     source_run_id: str,
     created_at_utc: Any = None,
     snapshot_date: Any = None,
@@ -1117,15 +1880,58 @@ def build_analysis_snapshot_record(
         recommendations.copy() if recommendations is not None else pd.DataFrame()
     )
     rankings = rankings.copy() if rankings is not None else pd.DataFrame()
+    score_contribution = (
+        score_contribution.copy() if score_contribution is not None else pd.DataFrame()
+    )
+    player_context = (
+        player_context.copy() if player_context is not None else pd.DataFrame()
+    )
 
     trend_player = ""
     trend_stat = ""
     trend_delta = 0.0
     trend_sentence = "No player trend qualified for the latest snapshot window."
+    contribution_sentence = (
+        "No direct scoring contribution story qualified for the latest snapshot window."
+    )
+    context_sentence = "No enriched player context is available for the featured story."
     recommendation_sentence = (
         "No fantasy recommendation qualified for the latest snapshot window."
     )
     ranking_sentence = "No fantasy ranking summary is available yet."
+    contribution_payload = {
+        "player_id": None,
+        "player_name": None,
+        "team_abbr": None,
+        "opponent_abbr": None,
+        "matchup": None,
+        "player_pts": None,
+        "team_pts": None,
+        "opponent_team_pts": None,
+        "player_points_share_of_team": None,
+        "player_points_share_of_game": None,
+        "scoring_margin": None,
+        "team_pts_qtr1": None,
+        "team_pts_qtr2": None,
+        "team_pts_qtr3": None,
+        "team_pts_qtr4": None,
+        "team_pts_ot_total": None,
+        "game_date": None,
+    }
+    context_payload = {
+        "player_id": None,
+        "player_name": None,
+        "team_abbr": None,
+        "team_name": None,
+        "position": None,
+        "height": None,
+        "weight": None,
+        "roster_status": None,
+        "season_exp": None,
+        "draft_year": None,
+        "draft_round": None,
+        "draft_number": None,
+    }
 
     if not trends.empty:
         trend_working = trends.copy()
@@ -1197,8 +2003,145 @@ def build_analysis_snapshot_record(
                     f"{top_ranked.get('recommendation_tier', 'n/a')}."
                 )
 
+    featured_contribution = None
+    if not score_contribution.empty:
+        contribution_working = score_contribution.copy()
+        contribution_working["game_date"] = pd.to_datetime(
+            contribution_working["game_date"], errors="coerce"
+        )
+        for col in ("player_points_share_of_team", "player_points_share_of_game"):
+            if col in contribution_working.columns:
+                contribution_working[col] = pd.to_numeric(
+                    contribution_working[col], errors="coerce"
+                )
+        if "player_pts" in contribution_working.columns:
+            contribution_working["player_pts"] = pd.to_numeric(
+                contribution_working["player_pts"], errors="coerce"
+            )
+        contribution_working = contribution_working.dropna(
+            subset=["game_date", "player_points_share_of_team", "player_pts"]
+        ).copy()
+        if not contribution_working.empty:
+            contribution_working = contribution_working.sort_values(
+                ["game_date", "player_points_share_of_team", "player_pts", "player_name"],
+                ascending=[False, False, False, True],
+            )
+            featured_contribution = contribution_working.iloc[0]
+            contribution_payload = {
+                "player_id": int(featured_contribution["player_id"])
+                if pd.notna(featured_contribution.get("player_id"))
+                else None,
+                "player_name": str(featured_contribution.get("player_name") or ""),
+                "team_abbr": str(featured_contribution.get("team_abbr") or ""),
+                "opponent_abbr": str(featured_contribution.get("opponent_abbr") or ""),
+                "matchup": str(featured_contribution.get("matchup") or ""),
+                "player_pts": int(featured_contribution["player_pts"])
+                if pd.notna(featured_contribution.get("player_pts"))
+                else None,
+                "team_pts": int(featured_contribution["team_pts"])
+                if pd.notna(featured_contribution.get("team_pts"))
+                else None,
+                "opponent_team_pts": int(featured_contribution["opponent_team_pts"])
+                if pd.notna(featured_contribution.get("opponent_team_pts"))
+                else None,
+                "player_points_share_of_team": round(
+                    float(featured_contribution["player_points_share_of_team"]), 4
+                ),
+                "player_points_share_of_game": round(
+                    float(featured_contribution["player_points_share_of_game"]), 4
+                )
+                if pd.notna(featured_contribution.get("player_points_share_of_game"))
+                else None,
+                "scoring_margin": int(featured_contribution["scoring_margin"])
+                if pd.notna(featured_contribution.get("scoring_margin"))
+                else None,
+                "team_pts_qtr1": int(featured_contribution["team_pts_qtr1"])
+                if pd.notna(featured_contribution.get("team_pts_qtr1"))
+                else None,
+                "team_pts_qtr2": int(featured_contribution["team_pts_qtr2"])
+                if pd.notna(featured_contribution.get("team_pts_qtr2"))
+                else None,
+                "team_pts_qtr3": int(featured_contribution["team_pts_qtr3"])
+                if pd.notna(featured_contribution.get("team_pts_qtr3"))
+                else None,
+                "team_pts_qtr4": int(featured_contribution["team_pts_qtr4"])
+                if pd.notna(featured_contribution.get("team_pts_qtr4"))
+                else None,
+                "team_pts_ot_total": int(featured_contribution["team_pts_ot_total"])
+                if pd.notna(featured_contribution.get("team_pts_ot_total"))
+                else None,
+                "game_date": featured_contribution["game_date"].date().isoformat(),
+            }
+            contribution_sentence = (
+                f"{contribution_payload['player_name']} supplied "
+                f"{contribution_payload['player_pts']} of {contribution_payload['team_pts']} "
+                f"{contribution_payload['team_abbr']} points against "
+                f"{contribution_payload['opponent_abbr']}, a "
+                f"{contribution_payload['player_points_share_of_team']:.1%} share of team scoring. "
+                f"Quarter totals landed at {contribution_payload['team_pts_qtr1']}-"
+                f"{contribution_payload['team_pts_qtr2']}-"
+                f"{contribution_payload['team_pts_qtr3']}-"
+                f"{contribution_payload['team_pts_qtr4']}"
+                + (
+                    f" with {contribution_payload['team_pts_ot_total']} overtime points."
+                    if contribution_payload["team_pts_ot_total"]
+                    else "."
+                )
+            )
+
+    if featured_contribution is not None and not player_context.empty:
+        context_working = player_context.copy()
+        if "player_id" in context_working.columns:
+            context_working["player_id"] = pd.to_numeric(
+                context_working["player_id"], errors="coerce"
+            )
+            context_working = context_working[
+                context_working["player_id"] == contribution_payload["player_id"]
+            ].copy()
+        if not context_working.empty:
+            featured_context = context_working.iloc[0]
+            roster_status = featured_context.get("roster_status")
+            if isinstance(roster_status, str):
+                roster_status = roster_status.lower() == "true"
+            context_payload = {
+                "player_id": int(featured_context["player_id"])
+                if pd.notna(featured_context.get("player_id"))
+                else None,
+                "player_name": str(featured_context.get("player_name") or ""),
+                "team_abbr": str(featured_context.get("latest_team_abbr") or ""),
+                "team_name": str(featured_context.get("team_name") or ""),
+                "position": str(featured_context.get("position") or ""),
+                "height": str(featured_context.get("height") or ""),
+                "weight": int(featured_context["weight"])
+                if pd.notna(featured_context.get("weight"))
+                else None,
+                "roster_status": bool(roster_status)
+                if roster_status in (True, False)
+                else None,
+                "season_exp": int(featured_context["season_exp"])
+                if pd.notna(featured_context.get("season_exp"))
+                else None,
+                "draft_year": str(featured_context.get("draft_year") or ""),
+                "draft_round": str(featured_context.get("draft_round") or ""),
+                "draft_number": str(featured_context.get("draft_number") or ""),
+            }
+            roster_label = (
+                "active" if context_payload["roster_status"] else "inactive"
+                if context_payload["roster_status"] is not None
+                else "unknown roster status"
+            )
+            context_sentence = (
+                f"{context_payload['player_name']} is listed as a "
+                f"{context_payload['position']} for {context_payload['team_name']} "
+                f"({context_payload['team_abbr']}), stands {context_payload['height']}, "
+                f"weighs {context_payload['weight']} pounds, and carries {roster_label} "
+                f"status with {context_payload['season_exp']} seasons of experience."
+            )
+
     headline = (
-        f"{top_recommendation['player_name']} headlines the {season} fantasy board"
+        f"{contribution_payload['player_name']} drives the latest {season} scoring snapshot"
+        if featured_contribution is not None
+        else f"{top_recommendation['player_name']} headlines the {season} fantasy board"
         if top_recommendation is not None
         else (
             f"{latest_row['pts_leader']} sets the pace for the {season} nightly board"
@@ -1209,7 +2152,8 @@ def build_analysis_snapshot_record(
     dek = (
         f"Latest leaders from {latest_game_date.isoformat()} are anchored by "
         f"{latest_row['pts_leader']} in scoring, {latest_row['reb_leader']} on the glass, "
-        f"and {latest_row['ast_leader']} as the top playmaker. {recommendation_sentence}"
+        f"and {latest_row['ast_leader']} as the top playmaker. "
+        f"{contribution_sentence if featured_contribution is not None else recommendation_sentence}"
     )
     body = "\n\n".join(
         [
@@ -1220,6 +2164,8 @@ def build_analysis_snapshot_record(
                 f"{int(latest_row['reb'])} rebounds and {latest_row['ast_leader']} handed out "
                 f"{int(latest_row['ast'])} assists."
             ),
+            contribution_sentence,
+            context_sentence,
             trend_sentence,
             ranking_sentence,
             recommendation_sentence,
@@ -1242,6 +2188,39 @@ def build_analysis_snapshot_record(
         "trend_player": trend_player,
         "trend_stat": trend_stat,
         "trend_delta": trend_delta,
+        "contribution_player_id": contribution_payload["player_id"],
+        "contribution_player_name": contribution_payload["player_name"],
+        "contribution_team_abbr": contribution_payload["team_abbr"],
+        "contribution_opponent_abbr": contribution_payload["opponent_abbr"],
+        "contribution_matchup": contribution_payload["matchup"],
+        "contribution_player_pts": contribution_payload["player_pts"],
+        "contribution_team_pts": contribution_payload["team_pts"],
+        "contribution_opponent_team_pts": contribution_payload["opponent_team_pts"],
+        "contribution_player_points_share_of_team": contribution_payload[
+            "player_points_share_of_team"
+        ],
+        "contribution_player_points_share_of_game": contribution_payload[
+            "player_points_share_of_game"
+        ],
+        "contribution_scoring_margin": contribution_payload["scoring_margin"],
+        "contribution_team_pts_qtr1": contribution_payload["team_pts_qtr1"],
+        "contribution_team_pts_qtr2": contribution_payload["team_pts_qtr2"],
+        "contribution_team_pts_qtr3": contribution_payload["team_pts_qtr3"],
+        "contribution_team_pts_qtr4": contribution_payload["team_pts_qtr4"],
+        "contribution_team_pts_ot_total": contribution_payload["team_pts_ot_total"],
+        "contribution_game_date": contribution_payload["game_date"],
+        "context_player_id": context_payload["player_id"],
+        "context_player_name": context_payload["player_name"],
+        "context_team_abbr": context_payload["team_abbr"],
+        "context_team_name": context_payload["team_name"],
+        "context_position": context_payload["position"],
+        "context_height": context_payload["height"],
+        "context_weight": context_payload["weight"],
+        "context_roster_status": context_payload["roster_status"],
+        "context_season_exp": context_payload["season_exp"],
+        "context_draft_year": context_payload["draft_year"],
+        "context_draft_round": context_payload["draft_round"],
+        "context_draft_number": context_payload["draft_number"],
         "freshness_ts": pd.to_datetime(
             freshness_ts or created_at, utc=True
         ).isoformat(),
@@ -1270,6 +2249,35 @@ def upsert_analysis_snapshot(
         @trend_player AS trend_player,
         @trend_stat AS trend_stat,
         @trend_delta AS trend_delta,
+        @contribution_player_id AS contribution_player_id,
+        @contribution_player_name AS contribution_player_name,
+        @contribution_team_abbr AS contribution_team_abbr,
+        @contribution_opponent_abbr AS contribution_opponent_abbr,
+        @contribution_matchup AS contribution_matchup,
+        @contribution_player_pts AS contribution_player_pts,
+        @contribution_team_pts AS contribution_team_pts,
+        @contribution_opponent_team_pts AS contribution_opponent_team_pts,
+        @contribution_player_points_share_of_team AS contribution_player_points_share_of_team,
+        @contribution_player_points_share_of_game AS contribution_player_points_share_of_game,
+        @contribution_scoring_margin AS contribution_scoring_margin,
+        @contribution_team_pts_qtr1 AS contribution_team_pts_qtr1,
+        @contribution_team_pts_qtr2 AS contribution_team_pts_qtr2,
+        @contribution_team_pts_qtr3 AS contribution_team_pts_qtr3,
+        @contribution_team_pts_qtr4 AS contribution_team_pts_qtr4,
+        @contribution_team_pts_ot_total AS contribution_team_pts_ot_total,
+        @contribution_game_date AS contribution_game_date,
+        @context_player_id AS context_player_id,
+        @context_player_name AS context_player_name,
+        @context_team_abbr AS context_team_abbr,
+        @context_team_name AS context_team_name,
+        @context_position AS context_position,
+        @context_height AS context_height,
+        @context_weight AS context_weight,
+        @context_roster_status AS context_roster_status,
+        @context_season_exp AS context_season_exp,
+        @context_draft_year AS context_draft_year,
+        @context_draft_round AS context_draft_round,
+        @context_draft_number AS context_draft_number,
         @freshness_ts AS freshness_ts,
         @source_run_id AS source_run_id
     ) S
@@ -1285,16 +2293,67 @@ def upsert_analysis_snapshot(
         trend_player = S.trend_player,
         trend_stat = S.trend_stat,
         trend_delta = S.trend_delta,
+        contribution_player_id = S.contribution_player_id,
+        contribution_player_name = S.contribution_player_name,
+        contribution_team_abbr = S.contribution_team_abbr,
+        contribution_opponent_abbr = S.contribution_opponent_abbr,
+        contribution_matchup = S.contribution_matchup,
+        contribution_player_pts = S.contribution_player_pts,
+        contribution_team_pts = S.contribution_team_pts,
+        contribution_opponent_team_pts = S.contribution_opponent_team_pts,
+        contribution_player_points_share_of_team = S.contribution_player_points_share_of_team,
+        contribution_player_points_share_of_game = S.contribution_player_points_share_of_game,
+        contribution_scoring_margin = S.contribution_scoring_margin,
+        contribution_team_pts_qtr1 = S.contribution_team_pts_qtr1,
+        contribution_team_pts_qtr2 = S.contribution_team_pts_qtr2,
+        contribution_team_pts_qtr3 = S.contribution_team_pts_qtr3,
+        contribution_team_pts_qtr4 = S.contribution_team_pts_qtr4,
+        contribution_team_pts_ot_total = S.contribution_team_pts_ot_total,
+        contribution_game_date = S.contribution_game_date,
+        context_player_id = S.context_player_id,
+        context_player_name = S.context_player_name,
+        context_team_abbr = S.context_team_abbr,
+        context_team_name = S.context_team_name,
+        context_position = S.context_position,
+        context_height = S.context_height,
+        context_weight = S.context_weight,
+        context_roster_status = S.context_roster_status,
+        context_season_exp = S.context_season_exp,
+        context_draft_year = S.context_draft_year,
+        context_draft_round = S.context_draft_round,
+        context_draft_number = S.context_draft_number,
         freshness_ts = S.freshness_ts,
         source_run_id = S.source_run_id
     WHEN NOT MATCHED THEN
       INSERT (
         snapshot_id, snapshot_date, created_at_utc, season, headline, dek, body,
-        trend_player, trend_stat, trend_delta, freshness_ts, source_run_id
+        trend_player, trend_stat, trend_delta, contribution_player_id,
+        contribution_player_name, contribution_team_abbr, contribution_opponent_abbr,
+        contribution_matchup, contribution_player_pts, contribution_team_pts,
+        contribution_opponent_team_pts, contribution_player_points_share_of_team,
+        contribution_player_points_share_of_game, contribution_scoring_margin,
+        contribution_team_pts_qtr1, contribution_team_pts_qtr2,
+        contribution_team_pts_qtr3, contribution_team_pts_qtr4,
+        contribution_team_pts_ot_total, contribution_game_date, context_player_id,
+        context_player_name, context_team_abbr, context_team_name, context_position,
+        context_height, context_weight, context_roster_status, context_season_exp,
+        context_draft_year, context_draft_round, context_draft_number,
+        freshness_ts, source_run_id
       )
       VALUES (
         S.snapshot_id, S.snapshot_date, S.created_at_utc, S.season, S.headline, S.dek, S.body,
-        S.trend_player, S.trend_stat, S.trend_delta, S.freshness_ts, S.source_run_id
+        S.trend_player, S.trend_stat, S.trend_delta, S.contribution_player_id,
+        S.contribution_player_name, S.contribution_team_abbr, S.contribution_opponent_abbr,
+        S.contribution_matchup, S.contribution_player_pts, S.contribution_team_pts,
+        S.contribution_opponent_team_pts, S.contribution_player_points_share_of_team,
+        S.contribution_player_points_share_of_game, S.contribution_scoring_margin,
+        S.contribution_team_pts_qtr1, S.contribution_team_pts_qtr2,
+        S.contribution_team_pts_qtr3, S.contribution_team_pts_qtr4,
+        S.contribution_team_pts_ot_total, S.contribution_game_date, S.context_player_id,
+        S.context_player_name, S.context_team_abbr, S.context_team_name, S.context_position,
+        S.context_height, S.context_weight, S.context_roster_status, S.context_season_exp,
+        S.context_draft_year, S.context_draft_round, S.context_draft_number,
+        S.freshness_ts, S.source_run_id
       )
     """
 
@@ -1319,6 +2378,115 @@ def upsert_analysis_snapshot(
             bigquery.ScalarQueryParameter("trend_stat", "STRING", record["trend_stat"]),
             bigquery.ScalarQueryParameter(
                 "trend_delta", "FLOAT64", record["trend_delta"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_player_id", "INT64", record["contribution_player_id"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_player_name",
+                "STRING",
+                record["contribution_player_name"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_abbr", "STRING", record["contribution_team_abbr"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_opponent_abbr",
+                "STRING",
+                record["contribution_opponent_abbr"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_matchup", "STRING", record["contribution_matchup"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_player_pts", "INT64", record["contribution_player_pts"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts", "INT64", record["contribution_team_pts"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_opponent_team_pts",
+                "INT64",
+                record["contribution_opponent_team_pts"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_player_points_share_of_team",
+                "FLOAT64",
+                record["contribution_player_points_share_of_team"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_player_points_share_of_game",
+                "FLOAT64",
+                record["contribution_player_points_share_of_game"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_scoring_margin",
+                "INT64",
+                record["contribution_scoring_margin"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts_qtr1",
+                "INT64",
+                record["contribution_team_pts_qtr1"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts_qtr2",
+                "INT64",
+                record["contribution_team_pts_qtr2"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts_qtr3",
+                "INT64",
+                record["contribution_team_pts_qtr3"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts_qtr4",
+                "INT64",
+                record["contribution_team_pts_qtr4"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_team_pts_ot_total",
+                "INT64",
+                record["contribution_team_pts_ot_total"],
+            ),
+            bigquery.ScalarQueryParameter(
+                "contribution_game_date", "DATE", record["contribution_game_date"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_player_id", "INT64", record["context_player_id"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_player_name", "STRING", record["context_player_name"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_team_abbr", "STRING", record["context_team_abbr"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_team_name", "STRING", record["context_team_name"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_position", "STRING", record["context_position"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_height", "STRING", record["context_height"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_weight", "INT64", record["context_weight"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_roster_status", "BOOL", record["context_roster_status"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_season_exp", "INT64", record["context_season_exp"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_draft_year", "STRING", record["context_draft_year"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_draft_round", "STRING", record["context_draft_round"]
+            ),
+            bigquery.ScalarQueryParameter(
+                "context_draft_number", "STRING", record["context_draft_number"]
             ),
             bigquery.ScalarQueryParameter(
                 "freshness_ts", "TIMESTAMP", record["freshness_ts"]

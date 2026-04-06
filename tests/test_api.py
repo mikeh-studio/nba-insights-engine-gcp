@@ -521,6 +521,39 @@ class FakeRepository(WarehouseRepository):
             "trend_player": "Tyrese Maxey",
             "trend_stat": "PTS",
             "trend_delta": 6.4,
+            "score_contribution": {
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "team_abbr": "PHI",
+                "opponent_abbr": "NYK",
+                "matchup": "PHI vs. NYK",
+                "player_pts": 31,
+                "team_pts": 112,
+                "opponent_team_pts": 108,
+                "player_points_share_of_team": 0.2768,
+                "player_points_share_of_game": 0.1416,
+                "scoring_margin": 4,
+                "team_pts_qtr1": 28,
+                "team_pts_qtr2": 24,
+                "team_pts_qtr3": 30,
+                "team_pts_qtr4": 30,
+                "team_pts_ot_total": 0,
+                "game_date": "2026-02-10",
+            },
+            "player_context": {
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "team_abbr": "PHI",
+                "team_name": "76ers",
+                "position": "G",
+                "height": "6-2",
+                "weight": 200,
+                "roster_status": True,
+                "season_exp": 5,
+                "draft_year": "2020",
+                "draft_round": "1",
+                "draft_number": "21",
+            },
             "freshness_ts": "2026-02-10T13:00:00+00:00",
             "source_run_id": "manual__2026-02-11T01:02:03+00:00",
         }
@@ -694,6 +727,20 @@ def test_api_health_smoke() -> None:
     assert payload["status"] == "fresh"
     assert payload["last_successful_finished_at_utc"] == "2026-02-11T01:15:00+00:00"
     assert "latest_successful_run" not in payload
+
+
+def test_api_analysis_latest_includes_structured_sections() -> None:
+    client = build_client()
+    response = client.get("/api/analysis/latest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["season"] == "2025-26"
+    assert payload["item"]["trend_player"] == "Tyrese Maxey"
+    assert payload["item"]["score_contribution"]["player_points_share_of_team"] == 0.2768
+    assert payload["item"]["score_contribution"]["team_pts_qtr4"] == 30
+    assert payload["item"]["player_context"]["position"] == "G"
+    assert payload["item"]["player_context"]["roster_status"] is True
 
 
 def test_api_player_search_rejects_blank_query() -> None:
