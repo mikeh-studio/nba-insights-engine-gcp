@@ -56,7 +56,7 @@
       }
       .nav {
         display: grid;
-        grid-template-columns: auto 1fr auto;
+        grid-template-columns: auto 1fr;
         gap: 1rem;
         align-items: center;
         padding: 1rem 1.125rem;
@@ -179,7 +179,7 @@
       h1 {
         margin: 0;
         font-family: "Bebas Neue", Impact, sans-serif;
-        font-size: clamp(3.2rem, 9vw, 5.8rem);
+        font-size: clamp(2.4rem, 6vw, 4.2rem);
         line-height: 0.92;
         letter-spacing: 0.03em;
       }
@@ -224,6 +224,11 @@
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.04);
         color: var(--highlight);
+      }
+      .chip.improvement {
+        border-color: rgba(240, 78, 35, 0.42);
+        background: rgba(240, 78, 35, 0.16);
+        color: #fff3ec;
       }
       .status,
       .metric-value,
@@ -368,6 +373,11 @@
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
+      .data-table tr.is-focus th,
+      .data-table tr.is-focus td {
+        color: var(--highlight);
+        background: rgba(240, 78, 35, 0.08);
+      }
       .metric-grid {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -502,17 +512,10 @@
             <span class="brand-title">NBA Stats Desk</span>
           </div>
           <div class="nav-links">
-            <a href="/">Discover</a>
-            <a href="/recommendations">Calls</a>
-            <a href="/analysis">Snapshot</a>
+            <a href="/">Dashboard</a>
+            <a href="/visualize">Visualize</a>
             <span class="season-tag">Season {{ season }}</span>
           </div>
-          <form class="search-form" id="player-search-form">
-            <label class="sr-only" for="global-player-search">Search player</label>
-            <input id="global-player-search" type="search" name="q" placeholder="Search player" aria-label="Search player" />
-            <button type="submit" class="button">Search</button>
-            <span id="search-msg" class="meta" style="display:none;"></span>
-          </form>
         </nav>
         {% block content %}{% endblock %}
       </div>

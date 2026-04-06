@@ -22,7 +22,7 @@ Core decisions for this version:
 - The operational scope is fixed to season `2025-26`.
 - Claude/Anthropic is not part of the v1 runtime path.
 - Analysis output is deterministic and template-based, not LLM-generated.
-- Supporting context is schedule-based only; injury-report ingestion is not part of the current runtime path.
+- Supporting context now includes upcoming schedule, team line scores, and player reference attributes; injury-report ingestion is still not part of the current runtime path.
 
 ## Pipeline Flow
 
@@ -30,13 +30,15 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 
 1. Extract active-player game logs from `nba_api` for season `2025-26`.
 2. Apply incremental filtering using a persisted watermark plus replay buffer.
-3. Fetch the upcoming schedule window from `nba_api`.
-4. Land both domains in GCS and load them into bronze staging tables.
-5. Run DQ checks for game logs and schedule context.
-6. Merge into `bronze.raw_game_logs` and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
-7. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
-8. Build a deterministic `gold.analysis_snapshots` record from leaderboard, trend, ranking, and recommendation outputs.
-9. Publish watermark and run metadata to `nba_metadata`.
+3. Derive the replay-window `game_id` set and fetch team line scores for those games.
+4. Fetch active-player reference attributes and roster context.
+5. Fetch the upcoming schedule window from `nba_api`.
+6. Land all four domains in GCS and load them into bronze staging tables.
+7. Run DQ checks for game logs, line scores, player reference, and schedule context.
+8. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
+9. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
+10. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
+11. Publish watermark and run metadata to `nba_metadata`.
 
 ## Optional Redshift Secondary Warehouse
 
@@ -47,18 +49,23 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 ## Warehouse Layout
 
 - `bronze.raw_game_logs`: replay-safe raw source table
+- `bronze.raw_game_line_scores`: team final score and quarter/OT line score by game
+- `bronze.raw_player_reference`: stable player profile and roster attributes
 - `bronze.raw_schedule`: upcoming schedule context by team
 - `silver.stg_game_logs_clean`: season-scoped cleaned source model
+- `silver.stg_game_line_scores_clean`: cleaned team line scores
+- `silver.stg_player_reference_clean`: cleaned player profile and roster context
 - `silver.int_player_game_enriched`: matchup and team enrichment
 - `silver.stg_schedule_clean`: cleaned schedule context
 - `gold.fct_player_game_stats`: fact table for player game stats
+- `gold.fct_team_game_scores`: team score, quarter totals, margin, and opponent context
+- `gold.fct_player_scoring_contribution`: player points as a share of team and game scoring
 - `gold.dim_player`: player dimension
 - `gold.player_trends`: recent-vs-prior player trend model
 - `gold.player_recent_form`: rolling recent form and box-score-derived proxy output
 - `gold.player_category_profile`: category-score profile for the ranking surface
 - `gold.player_opportunity_outlook`: schedule-only opportunity context
 - `gold.player_fantasy_rankings`: deterministic ranking surface
-<<<<<<< HEAD
 - `gold.workbench_compare`: fixed-window compare input model for bounded compare windows
 - `gold.workbench_dashboard`: dashboard-oriented player read model with bounded reason fields
 - `gold.workbench_home_dashboard`: seven-day dashboard snapshot model keyed by `as_of_date`
@@ -80,10 +87,9 @@ The FastAPI service is intended for Cloud Run and serves both HTML and JSON from
 Public HTML routes:
 
 - `/`
-- `/analysis`
-- `/recommendations`
 - `/players/{player_id}`
 - `/compare`
+- `/visualize`
 
 Public JSON routes:
 
@@ -101,7 +107,7 @@ The service reads only from gold tables and metadata tables. It is public read-o
 
 Freshness is reported from the latest successful pipeline run in `nba_metadata.pipeline_run_log`, evaluated against a daily freshness threshold.
 
-The workbench app now reads from the new screen-oriented workbench models for dashboard, player detail, compare, and date-keyed home snapshot flows. Browser-local tracking is client-side only, versioned, capped at 8 player IDs, and hydrated using the existing player-detail API instead of a dedicated tracking endpoint. Player identity surfaces use NBA headshots when available, with graceful fallbacks when an image is missing.
+`/api/analysis/latest` now returns the existing narrative fields plus nested `score_contribution` and `player_context` sections sourced from the expanded snapshot record.
 
 ## Local Setup
 
@@ -194,8 +200,7 @@ Primary validation commands:
 
 ```bash
 python -m compileall dags app tests
-pytest
-npm run test:tracking
+PYTHONPATH=. pytest
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
   --exclude source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
@@ -221,6 +226,7 @@ Current local validation caveats:
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - The targeted workbench-model `dbt test --select ...` command has the same BigQuery auth requirement.
 - Airflow parse checks require the Airflow CLI/module to be installed in the active environment.
+- As of April 5, 2026, local validation in this repo passes `compileall`, `PYTHONPATH=. pytest`, and `dbt parse`; `dbt test` is still blocked without a real BigQuery-enabled project instead of the profile fallback `local-project`.
 
 ## Security Hygiene
 

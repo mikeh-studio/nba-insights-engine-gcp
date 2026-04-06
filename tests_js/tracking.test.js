@@ -5,6 +5,7 @@ import {
   TRACKING_CAP,
   TRACKING_KEY,
   addTrackedPlayer,
+  buildCompareHref,
   loadTrackedPlayers,
   normalizeTrackedPayload,
   parseTrackedPayload,
@@ -66,4 +67,9 @@ test("addTrackedPlayer enforces cap", () => {
 test("removeTrackedPlayer removes only the selected ID", () => {
   const payload = removeTrackedPlayer({ version: 1, player_ids: [7, 9, 12] }, 9);
   assert.deepEqual(payload, { version: 1, player_ids: [7, 12] });
+});
+
+test("buildCompareHref preserves window and focus in compare links", () => {
+  const href = buildCompareHref(7, 9, "last_7", "scoring");
+  assert.equal(href, "/compare?player_a_id=7&player_b_id=9&window=last_7&focus=scoring");
 });

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
@@ -9,7 +9,19 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app.config import SUPPORTED_SEASON, Settings, get_settings
-from app.repository import BigQueryWarehouseRepository, WarehouseRepository
+from app.repository import (
+    BigQueryWarehouseRepository,
+    CompareFocus,
+    CompareWindow,
+    WarehouseRepository,
+    get_compare_focus_options,
+    get_compare_window_options,
+)
+from app.telemetry import (
+    instrument_compare_view,
+    instrument_dashboard_view,
+    instrument_player_view,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -97,14 +109,15 @@ def api_compare(
     player_b_id: int,
     repo: Annotated[WarehouseRepository, Depends(get_repository)],
     *,
-    window: Literal["last_5", "prior_5", "last_10"] = Query(default="last_5"),
+    window: CompareWindow = Query(default="last_5"),
+    focus: CompareFocus = Query(default="balanced"),
 ) -> dict:
     if player_a_id == player_b_id:
         raise HTTPException(
             status_code=400,
             detail="Compare players must be different",
         )
-    return repo.get_compare(player_a_id, player_b_id, window=window)
+    return repo.get_compare(player_a_id, player_b_id, window=window, focus=focus)
 
 
 @app.get("/api/health")
@@ -114,51 +127,27 @@ def api_health(repo: Annotated[WarehouseRepository, Depends(get_repository)]) ->
 
 @app.get("/", response_class=HTMLResponse)
 def home(
-    request: Request, repo: Annotated[WarehouseRepository, Depends(get_repository)]
+    request: Request,
+    repo: Annotated[WarehouseRepository, Depends(get_repository)],
+    as_of_date: str | None = Query(default=None),
 ) -> HTMLResponse:
-    dashboard = repo.get_dashboard()
+    dashboard = repo.get_dashboard(as_of_date=as_of_date)
+    health = repo.get_health()
+    instrument_dashboard_view(
+        route="/",
+        season=SUPPORTED_SEASON,
+        health=health,
+        dashboard=dashboard,
+    )
     context = {
         "request": request,
         "page_title": "NBA 2025-26 Stats Dashboard",
         "season": SUPPORTED_SEASON,
         "dashboard": dashboard,
-        "analysis": repo.get_latest_analysis(),
-        "health": repo.get_health(),
+        "health": health,
         "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "index.html", context)
-
-
-@app.get("/analysis", response_class=HTMLResponse)
-def analysis_page(
-    request: Request,
-    repo: Annotated[WarehouseRepository, Depends(get_repository)],
-) -> HTMLResponse:
-    context = {
-        "request": request,
-        "page_title": "NBA 2025-26 Analysis Snapshot",
-        "season": SUPPORTED_SEASON,
-        "analysis": repo.get_latest_analysis(),
-        "health": repo.get_health(),
-        "tracking_cap": TRACKING_CAP,
-    }
-    return templates.TemplateResponse(request, "analysis.html", context)
-
-
-@app.get("/recommendations", response_class=HTMLResponse)
-def recommendations_page(
-    request: Request,
-    repo: Annotated[WarehouseRepository, Depends(get_repository)],
-) -> HTMLResponse:
-    context = {
-        "request": request,
-        "page_title": "NBA 2025-26 Player Calls",
-        "season": SUPPORTED_SEASON,
-        "recommendations": repo.get_recommendations(limit=20),
-        "health": repo.get_health(),
-        "tracking_cap": TRACKING_CAP,
-    }
-    return templates.TemplateResponse(request, "recommendations.html", context)
 
 
 @app.get("/players/{player_id}", response_class=HTMLResponse)
@@ -170,15 +159,55 @@ def player_page(
     player_detail = repo.get_player_detail(player_id)
     if player_detail is None:
         raise HTTPException(status_code=404, detail="Player not found")
+    health = repo.get_health()
+    instrument_player_view(
+        route="/players/{player_id}",
+        season=SUPPORTED_SEASON,
+        health=health,
+        player_detail=player_detail,
+    )
     context = {
         "request": request,
         "page_title": f"{player_detail['player']['player_name']} Stats Outlook",
         "season": SUPPORTED_SEASON,
         "player_detail": player_detail,
-        "health": repo.get_health(),
+        "health": health,
         "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "player.html", context)
+
+
+@app.get("/api/players/{player_id}/game-log")
+def api_player_game_log(
+    player_id: int,
+    repo: Annotated[WarehouseRepository, Depends(get_repository)],
+    limit: int = Query(30, ge=1, le=82),
+) -> dict:
+    result = repo.get_player_game_log(player_id, limit=limit)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    return {"season": SUPPORTED_SEASON, "item": result}
+
+
+@app.get("/visualize", response_class=HTMLResponse)
+def visualize_page(
+    request: Request,
+    repo: Annotated[WarehouseRepository, Depends(get_repository)],
+    player_id: int | None = None,
+) -> HTMLResponse:
+    health = repo.get_health()
+    player_detail = None
+    if player_id is not None:
+        player_detail = repo.get_player_detail(player_id)
+    context = {
+        "request": request,
+        "page_title": "Player Stats Explorer",
+        "season": SUPPORTED_SEASON,
+        "health": health,
+        "player_detail": player_detail,
+        "player_id": player_id,
+    }
+    return templates.TemplateResponse(request, "visualize.html", context)
 
 
 @app.get("/compare", response_class=HTMLResponse)
@@ -187,10 +216,12 @@ def compare_page(
     repo: Annotated[WarehouseRepository, Depends(get_repository)],
     player_a_id: int | None = None,
     player_b_id: int | None = None,
-    window: Literal["last_5", "prior_5", "last_10"] = Query(default="last_5"),
+    window: CompareWindow = Query(default="last_5"),
+    focus: CompareFocus = Query(default="balanced"),
 ) -> HTMLResponse:
     compare_error: str | None = None
     comparison: dict | None = None
+    health = repo.get_health()
     player_a_detail = (
         repo.get_player_detail(player_a_id) if player_a_id is not None else None
     )
@@ -200,18 +231,42 @@ def compare_page(
         if player_a_id == player_b_id:
             compare_error = "Compare players must be different."
         else:
-            comparison = repo.get_compare(player_a_id, player_b_id, window=window)
+            comparison = repo.get_compare(
+                player_a_id,
+                player_b_id,
+                window=window,
+                focus=focus,
+            )
+    instrument_compare_view(
+        route="/compare",
+        season=SUPPORTED_SEASON,
+        health=health,
+        comparison=comparison,
+    )
     context = {
         "request": request,
         "page_title": "Compare Players",
         "season": SUPPORTED_SEASON,
-        "health": repo.get_health(),
+        "health": health,
         "player_a_detail": player_a_detail,
         "player_a_id": player_a_id,
         "player_b_id": player_b_id,
         "comparison": comparison,
         "compare_error": compare_error,
         "window": window,
+        "window_label": next(
+            option["label"]
+            for option in get_compare_window_options()
+            if option["key"] == window
+        ),
+        "focus": focus,
+        "focus_label": next(
+            option["label"]
+            for option in get_compare_focus_options()
+            if option["key"] == focus
+        ),
+        "compare_window_options": get_compare_window_options(),
+        "compare_focus_options": get_compare_focus_options(),
         "tracking_cap": TRACKING_CAP,
     }
     return templates.TemplateResponse(request, "compare.html", context)

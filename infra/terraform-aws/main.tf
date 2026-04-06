@@ -78,6 +78,31 @@ resource "aws_iam_role_policy" "redshift_s3" {
   policy = data.aws_iam_policy_document.redshift_s3_access.json
 }
 
+# --- Networking ---
+
+resource "aws_security_group" "redshift" {
+  name        = "${var.namespace_name}-redshift-sg"
+  description = "Allow inbound Redshift access from trusted CIDRs"
+  vpc_id      = var.vpc_id
+
+  ingress {
+    description = "Redshift port"
+    from_port   = 5439
+    to_port     = 5439
+    protocol    = "tcp"
+    cidr_blocks = var.allowed_cidr_blocks
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = var.tags
+}
+
 # --- Redshift Serverless ---
 
 resource "aws_redshiftserverless_namespace" "main" {
@@ -90,9 +115,11 @@ resource "aws_redshiftserverless_namespace" "main" {
 }
 
 resource "aws_redshiftserverless_workgroup" "main" {
-  namespace_name = aws_redshiftserverless_namespace.main.namespace_name
-  workgroup_name = var.workgroup_name
-  base_capacity  = var.redshift_base_capacity
+  namespace_name      = aws_redshiftserverless_namespace.main.namespace_name
+  workgroup_name      = var.workgroup_name
+  base_capacity       = var.redshift_base_capacity
   publicly_accessible = false
-  tags           = var.tags
+  subnet_ids          = var.subnet_ids
+  security_group_ids  = [aws_security_group.redshift.id]
+  tags                = var.tags
 }

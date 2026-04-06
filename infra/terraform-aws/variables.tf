@@ -38,6 +38,22 @@ variable "s3_bucket_name" {
   type = string
 }
 
+variable "vpc_id" {
+  description = "VPC ID for Redshift networking (no default VPC assumption)"
+  type        = string
+}
+
+variable "subnet_ids" {
+  description = "Subnet IDs for Redshift workgroup placement"
+  type        = list(string)
+}
+
+variable "allowed_cidr_blocks" {
+  description = "CIDR blocks allowed to connect to Redshift (port 5439)"
+  type        = list(string)
+  default     = ["10.0.0.0/8"]
+}
+
 variable "tags" {
   type = map(string)
   default = {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, Protocol
 
 from google.cloud import bigquery
@@ -13,6 +13,92 @@ STATE_STALE = "stale"
 STATE_MISSING = "missing"
 STATE_INSUFFICIENT_SAMPLE = "insufficient_sample"
 STATE_UNAVAILABLE = "unavailable"
+
+CompareWindow = Literal["last_3", "last_5", "last_7", "prior_5", "last_10"]
+CompareFocus = Literal["balanced", "scoring", "playmaking", "defense"]
+
+COMPARE_WINDOW_CONFIG: dict[CompareWindow, dict[str, Any]] = {
+    "last_3": {"label": "Last 3", "expected_games": 3},
+    "last_5": {"label": "Last 5", "expected_games": 5},
+    "last_7": {"label": "Last 7", "expected_games": 7},
+    "prior_5": {"label": "Prior 5", "expected_games": 5},
+    "last_10": {"label": "Last 10", "expected_games": 10},
+}
+
+COMPARE_METRIC_LABELS: dict[str, str] = {
+    "fantasy_proxy_score": "Box Score Index",
+    "avg_min": "Minutes",
+    "avg_pts": "PTS",
+    "avg_reb": "REB",
+    "avg_ast": "AST",
+    "avg_stl": "STL",
+    "avg_blk": "BLK",
+    "avg_fg3m": "3PM",
+    "avg_tov": "TOV",
+}
+
+COMPARE_FOCUS_CONFIG: dict[CompareFocus, dict[str, Any]] = {
+    "balanced": {
+        "label": "Balanced",
+        "description": "Keeps the full stat mix in the default read order.",
+        "metric_keys": [
+            "fantasy_proxy_score",
+            "avg_min",
+            "avg_pts",
+            "avg_reb",
+            "avg_ast",
+            "avg_stl",
+            "avg_blk",
+            "avg_fg3m",
+            "avg_tov",
+        ],
+    },
+    "scoring": {
+        "label": "Scoring",
+        "description": "Pushes scoring volume and shot-making to the top of the comparison.",
+        "metric_keys": [
+            "fantasy_proxy_score",
+            "avg_pts",
+            "avg_fg3m",
+            "avg_min",
+            "avg_ast",
+            "avg_reb",
+            "avg_stl",
+            "avg_blk",
+            "avg_tov",
+        ],
+    },
+    "playmaking": {
+        "label": "Playmaking",
+        "description": "Prioritizes creation load first, then supporting scoring context.",
+        "metric_keys": [
+            "avg_ast",
+            "avg_min",
+            "avg_tov",
+            "fantasy_proxy_score",
+            "avg_pts",
+            "avg_reb",
+            "avg_stl",
+            "avg_blk",
+            "avg_fg3m",
+        ],
+    },
+    "defense": {
+        "label": "Defense",
+        "description": "Highlights defensive events and rebounding before offense-first stats.",
+        "metric_keys": [
+            "avg_stl",
+            "avg_blk",
+            "avg_reb",
+            "fantasy_proxy_score",
+            "avg_min",
+            "avg_pts",
+            "avg_ast",
+            "avg_fg3m",
+            "avg_tov",
+        ],
+    },
+}
 
 
 def _to_iso(value: Any) -> str | None:
@@ -52,6 +138,21 @@ def _parse_iso_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _parse_iso_date(value: Any) -> date | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
+
+
 def _stringify_reason_value(value: Any) -> str | None:
     if value in (None, ""):
         return None
@@ -70,6 +171,55 @@ def _reason_label(code: str | None) -> str | None:
     if code is None:
         return None
     return labels.get(code, code.replace("_", " "))
+
+
+def get_compare_window_options() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": key,
+            "label": str(config["label"]),
+            "expected_games": int(config["expected_games"]),
+        }
+        for key, config in COMPARE_WINDOW_CONFIG.items()
+    ]
+
+
+def get_compare_focus_options() -> list[dict[str, str]]:
+    return [
+        {
+            "key": key,
+            "label": str(config["label"]),
+            "description": str(config["description"]),
+        }
+        for key, config in COMPARE_FOCUS_CONFIG.items()
+    ]
+
+
+def _compare_window_label(window: CompareWindow) -> str:
+    return str(COMPARE_WINDOW_CONFIG[window]["label"])
+
+
+def _compare_window_expected_games(window: CompareWindow) -> int:
+    return int(COMPARE_WINDOW_CONFIG[window]["expected_games"])
+
+
+def _empty_compare_metrics() -> dict[str, Any]:
+    return {key: None for key in COMPARE_METRIC_LABELS}
+
+
+def _build_compare_metric_rows(
+    metrics: dict[str, Any], focus: CompareFocus
+) -> list[dict[str, Any]]:
+    ordered_keys = list(COMPARE_FOCUS_CONFIG[focus]["metric_keys"])
+    return [
+        {
+            "key": key,
+            "label": COMPARE_METRIC_LABELS[key],
+            "value": metrics.get(key),
+            "is_focus": index < 3,
+        }
+        for index, key in enumerate(ordered_keys)
+    ]
 
 
 def build_reason_summary(row: dict[str, Any]) -> str | None:
@@ -105,6 +255,53 @@ def build_player_initials(player_name: Any) -> str:
     if not parts:
         return "NBA"
     return "".join(parts[:2])
+
+
+def _format_home_date_label(value: str) -> str:
+    parsed = _parse_iso_date(value)
+    if parsed is None:
+        return value
+    return parsed.strftime("%a %b %d")
+
+
+def _build_top_improvement_chips(row: dict[str, Any]) -> list[dict[str, Any]]:
+    deltas: list[tuple[str, float]] = []
+    for label, key in (
+        ("PTS", "pts_delta"),
+        ("REB", "reb_delta"),
+        ("AST", "ast_delta"),
+        ("STL", "stl_delta"),
+        ("BLK", "blk_delta"),
+        ("3PM", "fg3m_delta"),
+        ("MIN", "min_delta"),
+    ):
+        value = _to_float(row.get(key))
+        if value is None or value <= 0:
+            continue
+        deltas.append((label, round(value, 1)))
+    deltas.sort(key=lambda item: item[1], reverse=True)
+    return [
+        {"label": label, "delta": value}
+        for label, value in deltas[:3]
+    ]
+
+
+def _sanitize_category_list(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    filtered = [item for item in items if item != "TOV"]
+    if not filtered:
+        return None
+    return ", ".join(filtered)
+
+
+def _trend_direction(status: Any) -> str:
+    if status == "rising":
+        return "up"
+    if status == "falling":
+        return "down"
+    return "flat"
 
 
 def build_freshness_payload(
@@ -166,7 +363,6 @@ def _format_category_profile(row: dict[str, Any]) -> list[dict[str, Any]]:
         ("STL", "z_stl"),
         ("BLK", "z_blk"),
         ("3PM", "z_fg3m"),
-        ("TOV", "z_tov"),
     ):
         impact = _to_float(row.get(field_name))
         if impact is None:
@@ -237,7 +433,7 @@ def _default_recent_form() -> list[dict[str, Any]]:
 
 
 class WarehouseRepository(Protocol):
-    def get_dashboard(self) -> dict[str, Any]:
+    def get_dashboard(self, as_of_date: str | None = None) -> dict[str, Any]:
         ...
 
     def get_leaderboard(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -265,7 +461,8 @@ class WarehouseRepository(Protocol):
         player_a_id: int,
         player_b_id: int,
         *,
-        window: Literal["last_5", "prior_5", "last_10"] = "last_5",
+        window: CompareWindow = "last_5",
+        focus: CompareFocus = "balanced",
     ) -> dict[str, Any]:
         ...
 
@@ -273,6 +470,11 @@ class WarehouseRepository(Protocol):
         ...
 
     def get_latest_successful_run(self) -> dict[str, Any] | None:
+        ...
+
+    def get_player_game_log(
+        self, player_id: int, limit: int = 30
+    ) -> dict[str, Any] | None:
         ...
 
     def get_health(self) -> dict[str, Any]:
@@ -305,6 +507,9 @@ class BigQueryWarehouseRepository:
             f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_dashboard`"
         )
 
+    def _home_dashboard_table(self) -> str:
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_home_dashboard`"
+
     def _detail_table(self) -> str:
         return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_player_detail`"
 
@@ -316,12 +521,19 @@ class BigQueryWarehouseRepository:
     def _dim_player_table(self) -> str:
         return f"`{self.settings.project_id}.{self.settings.gold_dataset}.dim_player`"
 
+    def _fct_game_stats_table(self) -> str:
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.fct_player_game_stats`"
+
     def _decorate_dashboard_row(self, row: dict[str, Any]) -> dict[str, Any]:
         item = dict(row)
+        item["category_strengths"] = _sanitize_category_list(row.get("category_strengths"))
+        item["category_risks"] = _sanitize_category_list(row.get("category_risks"))
         item["reason_summary"] = build_reason_summary(row)
         item["opportunity_state"] = _opportunity_state_from_row(row)
         item["headshot_url"] = build_headshot_url(row.get("player_id"))
         item["player_initials"] = build_player_initials(row.get("player_name"))
+        item["top_improvements"] = _build_top_improvement_chips(row)
+        item["trend_direction"] = _trend_direction(row.get("trend_status"))
         return item
 
     def _fetch_dashboard_rows(
@@ -379,6 +591,98 @@ class BigQueryWarehouseRepository:
         """
         return [self._decorate_dashboard_row(row) for row in self._query(sql, params)]
 
+    def _fetch_home_date_options(self) -> list[str]:
+        sql = f"""
+        SELECT DISTINCT as_of_date
+        FROM {self._home_dashboard_table()}
+        WHERE season = @season
+        ORDER BY as_of_date DESC
+        LIMIT 7
+        """
+        return [
+            str(row["as_of_date"])
+            for row in self._query(
+                sql,
+                [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)],
+            )
+        ]
+
+    def _resolve_home_as_of_date(self, requested: str | None) -> tuple[str | None, list[str]]:
+        options = self._fetch_home_date_options()
+        if not options:
+            return None, []
+        if requested and requested in options:
+            return requested, options
+        parsed_requested = _parse_iso_date(requested)
+        if parsed_requested is not None:
+            normalized = parsed_requested.isoformat()
+            if normalized in options:
+                return normalized, options
+        return options[0], options
+
+    def _fetch_home_dashboard_rows(
+        self,
+        *,
+        as_of_date: str,
+        limit: int,
+        order_by: str,
+        where_clause: str = "",
+    ) -> list[dict[str, Any]]:
+        parsed_as_of_date = _parse_iso_date(as_of_date)
+        params: list[bigquery.ScalarQueryParameter] = [
+            bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+            bigquery.ScalarQueryParameter("as_of_date", "DATE", parsed_as_of_date),
+            bigquery.ScalarQueryParameter("limit", "INT64", limit),
+        ]
+        sql = f"""
+        SELECT
+          season,
+          as_of_date,
+          player_id,
+          player_name,
+          latest_team_abbr,
+          latest_game_date,
+          overall_rank,
+          recommendation_score,
+          recommendation_tier,
+          category_strengths,
+          category_risks,
+          last_5_games,
+          prior_5_games,
+          last_10_games,
+          fantasy_proxy_last_5,
+          fantasy_proxy_prior_5,
+          fantasy_proxy_last_10,
+          trend_delta,
+          trend_pct_change,
+          trend_status,
+          next_game_date,
+          next_opponent_abbr,
+          games_next_7d,
+          back_to_backs_next_7d,
+          opportunity_score,
+          pts_delta,
+          reb_delta,
+          ast_delta,
+          stl_delta,
+          blk_delta,
+          fg3m_delta,
+          min_delta,
+          reason_primary_code,
+          reason_primary_value,
+          reason_secondary_code,
+          reason_secondary_value,
+          reason_context_code,
+          reason_context_value
+        FROM {self._home_dashboard_table()}
+        WHERE season = @season
+          AND as_of_date = @as_of_date
+          {where_clause}
+        ORDER BY {order_by}
+        LIMIT @limit
+        """
+        return [self._decorate_dashboard_row(row) for row in self._query(sql, params)]
+
     def _fetch_player_identity(self, player_id: int) -> dict[str, Any] | None:
         sql = f"""
         SELECT
@@ -419,8 +723,8 @@ class BigQueryWarehouseRepository:
                     "overall_rank": None,
                     "recommendation_score": None,
                     "recommendation_tier": None,
-                    "category_strengths": None,
-                    "category_risks": None,
+                "category_strengths": None,
+                "category_risks": None,
                     "is_ranked": False,
                 },
                 "availability_state": STATE_UNAVAILABLE,
@@ -503,8 +807,10 @@ class BigQueryWarehouseRepository:
                 "overall_rank": row.get("overall_rank"),
                 "recommendation_score": row.get("recommendation_score"),
                 "recommendation_tier": row.get("recommendation_tier"),
-                "category_strengths": row.get("category_strengths"),
-                "category_risks": row.get("category_risks"),
+                "category_strengths": _sanitize_category_list(
+                    row.get("category_strengths")
+                ),
+                "category_risks": _sanitize_category_list(row.get("category_risks")),
                 "is_ranked": row.get("overall_rank") is not None,
             },
             "availability_state": (
@@ -529,24 +835,46 @@ class BigQueryWarehouseRepository:
             "opportunity": opportunity,
         }
 
-    def get_dashboard(self) -> dict[str, Any]:
-        rows = self._fetch_dashboard_rows(
+    def get_dashboard(self, as_of_date: str | None = None) -> dict[str, Any]:
+        selected_as_of_date, date_options = self._resolve_home_as_of_date(as_of_date)
+        if selected_as_of_date is None:
+            return {
+                "selected_as_of_date": None,
+                "date_options": [],
+                "signals": [],
+                "rankings": [],
+                "trends": [],
+                "opportunity": [],
+            }
+
+        rows = self._fetch_home_dashboard_rows(
+            as_of_date=selected_as_of_date,
             limit=18,
             order_by="recommendation_score DESC, overall_rank ASC, player_name",
         )
         signals = rows[:6]
-        rankings = sorted(rows, key=lambda item: int(item["overall_rank"]))[:8]
+        rankings = sorted(
+            [item for item in rows if item.get("overall_rank") is not None],
+            key=lambda item: int(item["overall_rank"]),
+        )[:8]
         trends = sorted(
             rows,
             key=lambda item: abs(_to_float(item.get("trend_delta")) or 0.0),
             reverse=True,
         )[:6]
         opportunity = [
-            item
-            for item in rows
-            if item["opportunity_state"] != STATE_UNAVAILABLE
+            item for item in rows if item["opportunity_state"] != STATE_UNAVAILABLE
         ][:6]
         return {
+            "selected_as_of_date": selected_as_of_date,
+            "date_options": [
+                {
+                    "value": value,
+                    "label": _format_home_date_label(value),
+                    "is_selected": value == selected_as_of_date,
+                }
+                for value in date_options
+            ],
             "signals": signals,
             "rankings": rankings,
             "trends": trends,
@@ -741,7 +1069,8 @@ class BigQueryWarehouseRepository:
         player_a_id: int,
         player_b_id: int,
         *,
-        window: Literal["last_5", "prior_5", "last_10"] = "last_5",
+        window: CompareWindow = "last_5",
+        focus: CompareFocus = "balanced",
     ) -> dict[str, Any]:
         sql = f"""
         SELECT
@@ -784,6 +1113,7 @@ class BigQueryWarehouseRepository:
             row = rows_by_player.get(player_id)
             detail = self.get_player_detail(player_id)
             if detail is None:
+                metrics = _empty_compare_metrics()
                 return {
                     "player_id": player_id,
                     "player_name": None,
@@ -792,32 +1122,41 @@ class BigQueryWarehouseRepository:
                     "latest_team_abbr": None,
                     "latest_game_date": None,
                     "window": window,
+                    "window_label": _compare_window_label(window),
                     "state": STATE_UNAVAILABLE,
                     "state_reason": "Player not found",
                     "games_in_window": None,
-                    "window_games_expected": None,
+                    "window_games_expected": _compare_window_expected_games(window),
                     "has_full_window": False,
-                    "metrics": {
-                        "fantasy_proxy_score": None,
-                        "avg_min": None,
-                        "avg_pts": None,
-                        "avg_reb": None,
-                        "avg_ast": None,
-                        "avg_stl": None,
-                        "avg_blk": None,
-                        "avg_fg3m": None,
-                        "avg_tov": None,
-                    },
+                    "metrics": metrics,
+                    "metric_rows": _build_compare_metric_rows(metrics, focus),
                 }
 
             games_in_window = _to_int((row or {}).get("games_in_window"))
             expected_games = _to_int((row or {}).get("window_games_expected"))
+            if expected_games is None:
+                expected_games = _compare_window_expected_games(window)
             if row is None:
-                state = detail["availability_state"]
-                state_reason = detail["availability_reason"]
+                state = STATE_UNAVAILABLE
+                state_reason = (
+                    detail["availability_reason"]
+                    if detail["availability_state"] == STATE_UNAVAILABLE
+                    else _window_reason(state, _compare_window_label(window))
+                )
             else:
                 state = _window_state(games_in_window, expected_games)
-                state_reason = _window_reason(state, window.replace("_", " ").title())
+                state_reason = _window_reason(state, _compare_window_label(window))
+            metrics = {
+                "fantasy_proxy_score": (row or {}).get("fantasy_proxy_score"),
+                "avg_min": (row or {}).get("avg_min"),
+                "avg_pts": (row or {}).get("avg_pts"),
+                "avg_reb": (row or {}).get("avg_reb"),
+                "avg_ast": (row or {}).get("avg_ast"),
+                "avg_stl": (row or {}).get("avg_stl"),
+                "avg_blk": (row or {}).get("avg_blk"),
+                "avg_fg3m": (row or {}).get("avg_fg3m"),
+                "avg_tov": (row or {}).get("avg_tov"),
+            }
             return {
                 "player_id": player_id,
                 "player_name": detail["player"]["player_name"],
@@ -830,29 +1169,25 @@ class BigQueryWarehouseRepository:
                     "latest_game_date", detail["player"]["latest_game_date"]
                 ),
                 "window": window,
+                "window_label": _compare_window_label(window),
                 "state": state,
                 "state_reason": state_reason,
                 "games_in_window": games_in_window,
                 "window_games_expected": expected_games,
                 "has_full_window": bool((row or {}).get("has_full_window")),
                 "availability_state": detail["availability_state"],
-                "metrics": {
-                    "fantasy_proxy_score": (row or {}).get("fantasy_proxy_score"),
-                    "avg_min": (row or {}).get("avg_min"),
-                    "avg_pts": (row or {}).get("avg_pts"),
-                    "avg_reb": (row or {}).get("avg_reb"),
-                    "avg_ast": (row or {}).get("avg_ast"),
-                    "avg_stl": (row or {}).get("avg_stl"),
-                    "avg_blk": (row or {}).get("avg_blk"),
-                    "avg_fg3m": (row or {}).get("avg_fg3m"),
-                    "avg_tov": (row or {}).get("avg_tov"),
-                },
+                "metrics": metrics,
+                "metric_rows": _build_compare_metric_rows(metrics, focus),
                 "player_detail": detail,
             }
 
         return {
             "season": SUPPORTED_SEASON,
             "window": window,
+            "window_label": _compare_window_label(window),
+            "focus": focus,
+            "focus_label": str(COMPARE_FOCUS_CONFIG[focus]["label"]),
+            "focus_description": str(COMPARE_FOCUS_CONFIG[focus]["description"]),
             "comparison": {
                 "player_a": build_side(player_a_id),
                 "player_b": build_side(player_b_id),
@@ -873,6 +1208,35 @@ class BigQueryWarehouseRepository:
           trend_player,
           trend_stat,
           trend_delta,
+          contribution_player_id,
+          contribution_player_name,
+          contribution_team_abbr,
+          contribution_opponent_abbr,
+          contribution_matchup,
+          contribution_player_pts,
+          contribution_team_pts,
+          contribution_opponent_team_pts,
+          contribution_player_points_share_of_team,
+          contribution_player_points_share_of_game,
+          contribution_scoring_margin,
+          contribution_team_pts_qtr1,
+          contribution_team_pts_qtr2,
+          contribution_team_pts_qtr3,
+          contribution_team_pts_qtr4,
+          contribution_team_pts_ot_total,
+          contribution_game_date,
+          context_player_id,
+          context_player_name,
+          context_team_abbr,
+          context_team_name,
+          context_position,
+          context_height,
+          context_weight,
+          context_roster_status,
+          context_season_exp,
+          context_draft_year,
+          context_draft_round,
+          context_draft_number,
           freshness_ts,
           source_run_id
         FROM {table}
@@ -883,7 +1247,7 @@ class BigQueryWarehouseRepository:
         rows = self._query(
             sql, [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)]
         )
-        return rows[0] if rows else None
+        return build_analysis_payload(rows[0]) if rows else None
 
     def get_latest_successful_run(self) -> dict[str, Any] | None:
         table = f"`{self.settings.project_id}.{self.settings.metadata_dataset}.pipeline_run_log`"
@@ -902,6 +1266,40 @@ class BigQueryWarehouseRepository:
         )
         return rows[0] if rows else None
 
+    def get_player_game_log(
+        self, player_id: int, limit: int = 30
+    ) -> dict[str, Any] | None:
+        identity = self._fetch_player_identity(player_id)
+        if identity is None:
+            return None
+
+        sql = f"""
+        SELECT
+          game_date, opponent_abbr, home_away, wl, min,
+          pts, reb, ast, stl, blk, tov, fg3m,
+          fgm, fga, fg_pct, ftm, fta, ft_pct,
+          fantasy_points_simple
+        FROM {self._fct_game_stats_table()}
+        WHERE season = @season AND player_id = @player_id
+        ORDER BY game_date DESC
+        LIMIT @limit
+        """
+        rows = self._query(
+            sql,
+            [
+                bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+                bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit),
+            ],
+        )
+        rows.reverse()
+        return {
+            "player_id": identity.get("player_id"),
+            "player_name": identity.get("player_name"),
+            "season": SUPPORTED_SEASON,
+            "games": rows,
+        }
+
     def get_health(self) -> dict[str, Any]:
         latest_run = self.get_latest_successful_run()
         payload = build_freshness_payload(
@@ -911,3 +1309,56 @@ class BigQueryWarehouseRepository:
         )
         payload["season"] = SUPPORTED_SEASON
         return payload
+
+
+def build_analysis_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+
+    item = dict(row)
+    item["score_contribution"] = {
+        "player_id": _to_int(row.get("contribution_player_id")),
+        "player_name": row.get("contribution_player_name"),
+        "team_abbr": row.get("contribution_team_abbr"),
+        "opponent_abbr": row.get("contribution_opponent_abbr"),
+        "matchup": row.get("contribution_matchup"),
+        "player_pts": _to_int(row.get("contribution_player_pts")),
+        "team_pts": _to_int(row.get("contribution_team_pts")),
+        "opponent_team_pts": _to_int(row.get("contribution_opponent_team_pts")),
+        "player_points_share_of_team": _to_float(
+            row.get("contribution_player_points_share_of_team")
+        ),
+        "player_points_share_of_game": _to_float(
+            row.get("contribution_player_points_share_of_game")
+        ),
+        "scoring_margin": _to_int(row.get("contribution_scoring_margin")),
+        "team_pts_qtr1": _to_int(row.get("contribution_team_pts_qtr1")),
+        "team_pts_qtr2": _to_int(row.get("contribution_team_pts_qtr2")),
+        "team_pts_qtr3": _to_int(row.get("contribution_team_pts_qtr3")),
+        "team_pts_qtr4": _to_int(row.get("contribution_team_pts_qtr4")),
+        "team_pts_ot_total": _to_int(row.get("contribution_team_pts_ot_total")),
+        "game_date": row.get("contribution_game_date"),
+    }
+    item["player_context"] = {
+        "player_id": _to_int(row.get("context_player_id")),
+        "player_name": row.get("context_player_name"),
+        "team_abbr": row.get("context_team_abbr"),
+        "team_name": row.get("context_team_name"),
+        "position": row.get("context_position"),
+        "height": row.get("context_height"),
+        "weight": _to_int(row.get("context_weight")),
+        "roster_status": (
+            row.get("context_roster_status")
+            if row.get("context_roster_status") in (True, False)
+            else (
+                str(row.get("context_roster_status")).lower() == "true"
+                if row.get("context_roster_status") not in (None, "")
+                else None
+            )
+        ),
+        "season_exp": _to_int(row.get("context_season_exp")),
+        "draft_year": row.get("context_draft_year"),
+        "draft_round": row.get("context_draft_round"),
+        "draft_number": row.get("context_draft_number"),
+    }
+    return item

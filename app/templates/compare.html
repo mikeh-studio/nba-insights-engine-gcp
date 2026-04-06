@@ -7,7 +7,8 @@
         <h1>Player Comparison</h1>
       </div>
       <div class="hero-actions">
-        <span class="status">Window {{ window }}</span>
+        <span class="status">Window {{ window_label }}</span>
+        <span class="status">Focus {{ focus_label }}</span>
       </div>
     </div>
     <p class="subhead">
@@ -76,12 +77,17 @@
         {% endif %}
 
         {% if player_a_id %}
-          <form class="compare-form" data-compare-search-form data-player-a-id="{{ player_a_id }}" data-window="{{ window }}">
+          <form class="compare-form" data-compare-search-form data-player-a-id="{{ player_a_id }}">
             <label class="sr-only" for="compare-player-search">Compare against</label>
             <input class="input" id="compare-player-search" name="q" placeholder="Search second player" />
             <select class="select" name="window" aria-label="Compare window">
-              {% for option in ["last_5", "prior_5", "last_10"] %}
-                <option value="{{ option }}"{% if option == window %} selected{% endif %}>{{ option }}</option>
+              {% for option in compare_window_options %}
+                <option value="{{ option.key }}"{% if option.key == window %} selected{% endif %}>{{ option.label }}</option>
+              {% endfor %}
+            </select>
+            <select class="select" name="focus" aria-label="Compare focus">
+              {% for option in compare_focus_options %}
+                <option value="{{ option.key }}"{% if option.key == focus %} selected{% endif %}>{{ option.label }}</option>
               {% endfor %}
             </select>
             <button type="submit" class="button">Load comparison</button>
@@ -91,7 +97,7 @@
 
         <details class="explain">
           <summary>How this works</summary>
-          <p>Compare uses the fixed-window compare model only. The requested window never silently changes, and a weak side stays visible with an explicit limitation message.</p>
+          <p>Compare uses a bounded preset model only. The requested window and stat focus never silently change, and a weak side stays visible with an explicit limitation message.</p>
         </details>
       </article>
 
@@ -99,11 +105,17 @@
         <article class="card">
           <div class="card-header">
             <h2>Comparison Surface</h2>
-            <div class="chip-row">
-              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=last_5">Last 5</a>
-              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=prior_5">Prior 5</a>
-              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window=last_10">Last 10</a>
-            </div>
+          </div>
+          <p class="meta">Stat focus: {{ comparison.focus_label }}. {{ comparison.focus_description }}</p>
+          <div class="chip-row">
+            {% for option in compare_window_options %}
+              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window={{ option.key }}&focus={{ comparison.focus }}">{{ option.label }}</a>
+            {% endfor %}
+          </div>
+          <div class="chip-row">
+            {% for option in compare_focus_options %}
+              <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window={{ comparison.window }}&focus={{ option.key }}">{{ option.label }}</a>
+            {% endfor %}
           </div>
           <div class="compare-grid">
             {% for side_key in ["player_a", "player_b"] %}
@@ -119,7 +131,7 @@
                     </div>
                     <div>
                       <h3>{{ side.player_name or "Unknown player" }}</h3>
-                      <p class="meta">{{ side.latest_team_abbr or "NBA" }} · {{ side.window }}</p>
+                      <p class="meta">{{ side.latest_team_abbr or "NBA" }} · {{ side.window_label }}</p>
                     </div>
                   </div>
                   <button
@@ -145,15 +157,12 @@
                 {% endif %}
                 <table class="data-table">
                   <tbody>
-                    <tr><th>Box Score Index</th><td>{{ side.metrics.fantasy_proxy_score }}</td></tr>
-                    <tr><th>Minutes</th><td>{{ side.metrics.avg_min }}</td></tr>
-                    <tr><th>PTS</th><td>{{ side.metrics.avg_pts }}</td></tr>
-                    <tr><th>REB</th><td>{{ side.metrics.avg_reb }}</td></tr>
-                    <tr><th>AST</th><td>{{ side.metrics.avg_ast }}</td></tr>
-                    <tr><th>STL</th><td>{{ side.metrics.avg_stl }}</td></tr>
-                    <tr><th>BLK</th><td>{{ side.metrics.avg_blk }}</td></tr>
-                    <tr><th>3PM</th><td>{{ side.metrics.avg_fg3m }}</td></tr>
-                    <tr><th>TOV</th><td>{{ side.metrics.avg_tov }}</td></tr>
+                    {% for item in side.metric_rows %}
+                      <tr{% if item.is_focus %} class="is-focus"{% endif %}>
+                        <th>{{ item.label }}</th>
+                        <td>{{ item.value }}</td>
+                      </tr>
+                    {% endfor %}
                   </tbody>
                 </table>
               </article>
@@ -164,7 +173,7 @@
         <article class="card">
           <div class="empty-state">
             <strong>Pick a second player to finish the comparison.</strong>
-            <p class="meta">Search for the second player above. The compare surface will keep the selected window and show limitations explicitly if one side lacks enough history.</p>
+            <p class="meta">Search for the second player above. The compare surface will keep the selected window and focus, then show limitations explicitly if one side lacks enough history.</p>
           </div>
         </article>
       {% endif %}

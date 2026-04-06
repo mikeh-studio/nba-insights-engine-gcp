@@ -3,6 +3,8 @@ version: 2
 models:
   - name: stg_game_logs_clean
     columns:
+      - name: game_id
+        tests: [not_null]
       - name: player_id
         tests: [not_null]
       - name: game_date
@@ -22,6 +24,8 @@ models:
                 values: ['W', 'L']
   - name: int_player_game_enriched
     columns:
+      - name: game_id
+        tests: [not_null]
       - name: season
         tests:
           - not_null
@@ -45,3 +49,19 @@ models:
           - accepted_values:
               arguments:
                 values: ['scheduled', 'final', 'postponed']
+  - name: stg_game_line_scores_clean
+    columns:
+      - name: game_id
+        tests: [not_null]
+      - name: team_id
+        tests: [not_null]
+      - name: team_abbr
+        tests: [not_null]
+      - name: pts
+        tests: [not_null]
+  - name: stg_player_reference_clean
+    columns:
+      - name: player_id
+        tests: [not_null, unique]
+      - name: player_name
+        tests: [not_null]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,11 +10,51 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.main import app, get_repository
 from app.repository import WarehouseRepository
+from app.telemetry import LOGGER_NAME
 
 
 class FakeRepository(WarehouseRepository):
-    def get_dashboard(self) -> dict:
+    def get_dashboard(self, as_of_date: str | None = None) -> dict:
+        selected_date = as_of_date or "2026-02-11"
         return {
+            "selected_as_of_date": selected_date,
+            "date_options": [
+                {
+                    "value": "2026-02-11",
+                    "label": "Wed Feb 11",
+                    "is_selected": selected_date == "2026-02-11",
+                },
+                {
+                    "value": "2026-02-10",
+                    "label": "Tue Feb 10",
+                    "is_selected": selected_date == "2026-02-10",
+                },
+                {
+                    "value": "2026-02-09",
+                    "label": "Mon Feb 09",
+                    "is_selected": selected_date == "2026-02-09",
+                },
+                {
+                    "value": "2026-02-08",
+                    "label": "Sun Feb 08",
+                    "is_selected": selected_date == "2026-02-08",
+                },
+                {
+                    "value": "2026-02-07",
+                    "label": "Sat Feb 07",
+                    "is_selected": selected_date == "2026-02-07",
+                },
+                {
+                    "value": "2026-02-06",
+                    "label": "Fri Feb 06",
+                    "is_selected": selected_date == "2026-02-06",
+                },
+                {
+                    "value": "2026-02-05",
+                    "label": "Thu Feb 05",
+                    "is_selected": selected_date == "2026-02-05",
+                },
+            ],
             "signals": [
                 {
                     "player_id": 7,
@@ -25,8 +66,14 @@ class FakeRepository(WarehouseRepository):
                     "category_risks": "FG%",
                     "reason_summary": "recent box score production: +5.2 | next 7 days: 4",
                     "trend_status": "rising",
+                    "trend_direction": "up",
                     "headshot_url": "https://cdn.nba.com/headshots/nba/latest/1040x760/7.png",
                     "player_initials": "TM",
+                    "top_improvements": [
+                        {"label": "PTS", "delta": 6.4},
+                        {"label": "AST", "delta": 1.4},
+                        {"label": "3PM", "delta": 0.6},
+                    ],
                 }
             ],
             "rankings": [
@@ -44,6 +91,7 @@ class FakeRepository(WarehouseRepository):
                     "player_id": 7,
                     "player_name": "Tyrese Maxey",
                     "trend_status": "rising",
+                    "trend_direction": "up",
                     "trend_delta": 6.4,
                 }
             ],
@@ -280,16 +328,145 @@ class FakeRepository(WarehouseRepository):
             }
         return None
 
+    def get_player_game_log(self, player_id: int, limit: int = 30) -> dict | None:
+        if player_id == 7:
+            games = [
+                {
+                    "game_date": f"2026-02-{str(d).zfill(2)}",
+                    "opponent_abbr": "NYK",
+                    "home_away": "home",
+                    "wl": "W",
+                    "min": "36.0",
+                    "pts": str(20 + d),
+                    "reb": "5",
+                    "ast": "7",
+                    "stl": "1",
+                    "blk": "0",
+                    "tov": "2",
+                    "fg3m": "3",
+                    "fgm": "9",
+                    "fga": "18",
+                    "fg_pct": "0.500",
+                    "ftm": "4",
+                    "fta": "5",
+                    "ft_pct": "0.800",
+                    "fantasy_points_simple": "42.5",
+                }
+                for d in range(1, min(limit, 5) + 1)
+            ]
+            return {
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "season": "2025-26",
+                "games": games,
+            }
+        if player_id == 9:
+            return {
+                "player_id": 9,
+                "player_name": "Mikal Bridges",
+                "season": "2025-26",
+                "games": [],
+            }
+        return None
+
     def get_compare(
         self,
         player_a_id: int,
         player_b_id: int,
         *,
         window: str = "last_5",
+        focus: str = "balanced",
     ) -> dict:
+        window_labels = {
+            "last_3": "Last 3",
+            "last_5": "Last 5",
+            "last_7": "Last 7",
+            "prior_5": "Prior 5",
+            "last_10": "Last 10",
+        }
+        expected_games = {
+            "last_3": 3,
+            "last_5": 5,
+            "last_7": 7,
+            "prior_5": 5,
+            "last_10": 10,
+        }
+        focus_rows = {
+            "balanced": [
+                "Box Score Index",
+                "Minutes",
+                "PTS",
+                "REB",
+                "AST",
+                "STL",
+                "BLK",
+                "3PM",
+                "TOV",
+            ],
+            "scoring": [
+                "Box Score Index",
+                "PTS",
+                "3PM",
+                "Minutes",
+                "AST",
+                "REB",
+                "STL",
+                "BLK",
+                "TOV",
+            ],
+        }
+        row_labels = focus_rows.get(focus, focus_rows["balanced"])
+
+        def metric_rows(metric_values: dict[str, float | None]) -> list[dict[str, object]]:
+            label_to_key = {
+                "Box Score Index": "fantasy_proxy_score",
+                "Minutes": "avg_min",
+                "PTS": "avg_pts",
+                "REB": "avg_reb",
+                "AST": "avg_ast",
+                "STL": "avg_stl",
+                "BLK": "avg_blk",
+                "3PM": "avg_fg3m",
+                "TOV": "avg_tov",
+            }
+            return [
+                {
+                    "label": label,
+                    "value": metric_values.get(label_to_key[label]),
+                    "is_focus": index < 3,
+                }
+                for index, label in enumerate(row_labels)
+            ]
+
+        player_a_metrics = {
+            "fantasy_proxy_score": 45.2,
+            "avg_min": 36.1,
+            "avg_pts": 28.4,
+            "avg_reb": 4.8,
+            "avg_ast": 7.4,
+            "avg_stl": 1.3,
+            "avg_blk": 0.3,
+            "avg_fg3m": 3.1,
+            "avg_tov": 2.1,
+        }
+        player_b_metrics = {
+            "fantasy_proxy_score": None,
+            "avg_min": None,
+            "avg_pts": None,
+            "avg_reb": None,
+            "avg_ast": None,
+            "avg_stl": None,
+            "avg_blk": None,
+            "avg_fg3m": None,
+            "avg_tov": None,
+        }
         return {
             "season": "2025-26",
             "window": window,
+            "window_label": window_labels[window],
+            "focus": focus,
+            "focus_label": focus.title(),
+            "focus_description": "Focus description for tests.",
             "comparison": {
                 "player_a": {
                     "player_id": player_a_id,
@@ -299,24 +476,16 @@ class FakeRepository(WarehouseRepository):
                     "latest_team_abbr": "PHI",
                     "latest_game_date": "2026-02-10",
                     "window": window,
+                    "window_label": window_labels[window],
                     "state": "fresh",
                     "state_reason": None,
-                    "games_in_window": 5,
-                    "window_games_expected": 5,
+                    "games_in_window": expected_games[window],
+                    "window_games_expected": expected_games[window],
                     "has_full_window": True,
                     "availability_state": "fresh",
                     "player_detail": self.get_player_detail(player_a_id),
-                    "metrics": {
-                        "fantasy_proxy_score": 45.2,
-                        "avg_min": 36.1,
-                        "avg_pts": 28.4,
-                        "avg_reb": 4.8,
-                        "avg_ast": 7.4,
-                        "avg_stl": 1.3,
-                        "avg_blk": 0.3,
-                        "avg_fg3m": 3.1,
-                        "avg_tov": 2.1,
-                    },
+                    "metrics": player_a_metrics,
+                    "metric_rows": metric_rows(player_a_metrics),
                 },
                 "player_b": {
                     "player_id": player_b_id,
@@ -326,24 +495,16 @@ class FakeRepository(WarehouseRepository):
                     "latest_team_abbr": "NYK",
                     "latest_game_date": None,
                     "window": window,
+                    "window_label": window_labels[window],
                     "state": "unavailable",
                     "state_reason": "Not currently ranked",
                     "games_in_window": None,
-                    "window_games_expected": 5,
+                    "window_games_expected": expected_games[window],
                     "has_full_window": False,
                     "availability_state": "unavailable",
                     "player_detail": self.get_player_detail(player_b_id),
-                    "metrics": {
-                        "fantasy_proxy_score": None,
-                        "avg_min": None,
-                        "avg_pts": None,
-                        "avg_reb": None,
-                        "avg_ast": None,
-                        "avg_stl": None,
-                        "avg_blk": None,
-                        "avg_fg3m": None,
-                        "avg_tov": None,
-                    },
+                    "metrics": player_b_metrics,
+                    "metric_rows": metric_rows(player_b_metrics),
                 },
             },
         }
@@ -360,6 +521,39 @@ class FakeRepository(WarehouseRepository):
             "trend_player": "Tyrese Maxey",
             "trend_stat": "PTS",
             "trend_delta": 6.4,
+            "score_contribution": {
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "team_abbr": "PHI",
+                "opponent_abbr": "NYK",
+                "matchup": "PHI vs. NYK",
+                "player_pts": 31,
+                "team_pts": 112,
+                "opponent_team_pts": 108,
+                "player_points_share_of_team": 0.2768,
+                "player_points_share_of_game": 0.1416,
+                "scoring_margin": 4,
+                "team_pts_qtr1": 28,
+                "team_pts_qtr2": 24,
+                "team_pts_qtr3": 30,
+                "team_pts_qtr4": 30,
+                "team_pts_ot_total": 0,
+                "game_date": "2026-02-10",
+            },
+            "player_context": {
+                "player_id": 7,
+                "player_name": "Tyrese Maxey",
+                "team_abbr": "PHI",
+                "team_name": "76ers",
+                "position": "G",
+                "height": "6-2",
+                "weight": 200,
+                "roster_status": True,
+                "season_exp": 5,
+                "draft_year": "2020",
+                "draft_round": "1",
+                "draft_number": "21",
+            },
             "freshness_ts": "2026-02-10T13:00:00+00:00",
             "source_run_id": "manual__2026-02-11T01:02:03+00:00",
         }
@@ -393,8 +587,8 @@ class StaleRepository(FakeRepository):
 
 
 class MissingOpportunityRepository(FakeRepository):
-    def get_dashboard(self) -> dict:
-        payload = super().get_dashboard()
+    def get_dashboard(self, as_of_date: str | None = None) -> dict:
+        payload = super().get_dashboard(as_of_date=as_of_date)
         payload["opportunity"] = []
         return payload
 
@@ -420,8 +614,16 @@ def test_home_page_smoke() -> None:
     assert response.status_code == 200
     assert "Stats Dashboard" in response.text
     assert "Signal Board" in response.text
-    assert "Tracked Players" in response.text
+    assert "Choose Day" in response.text
+    assert "Wed Feb 11" in response.text
     assert "https://cdn.nba.com/headshots/nba/latest/1040x760/7.png" in response.text
+    assert "PTS +6.4" in response.text
+    assert "Strengths PTS, AST, 3PM" in response.text
+    assert "Strengths TOV" not in response.text
+    assert "Tracked Players" not in response.text
+    assert "/analysis" not in response.text
+    assert "/recommendations" not in response.text
+    assert "Risk " not in response.text
 
 
 def test_home_page_shows_stale_notice() -> None:
@@ -429,7 +631,8 @@ def test_home_page_shows_stale_notice() -> None:
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Use the board with caution." in response.text
+    assert "Use the board with caution." not in response.text
+    assert "Last refresh 2026-02-09T12:00:00+00:00" in response.text
 
 
 def test_home_page_missing_opportunity_state() -> None:
@@ -440,22 +643,26 @@ def test_home_page_missing_opportunity_state() -> None:
     assert "Opportunity context is unavailable." in response.text
 
 
-def test_analysis_page_smoke() -> None:
+def test_home_page_respects_selected_day() -> None:
+    client = build_client()
+    response = client.get("/?as_of_date=2026-02-09")
+
+    assert response.status_code == 200
+    assert "Mon Feb 09" in response.text
+
+
+def test_analysis_page_removed() -> None:
     client = build_client()
     response = client.get("/analysis")
 
-    assert response.status_code == 200
-    assert "Latest Snapshot" in response.text
-    assert "Tyrese Maxey headlines the 2025-26 trend watch" in response.text
+    assert response.status_code == 404
 
 
-def test_recommendations_page_smoke() -> None:
+def test_recommendations_page_removed() -> None:
     client = build_client()
     response = client.get("/recommendations")
 
-    assert response.status_code == 200
-    assert "Recommendation Feed" in response.text
-    assert "Tyrese Maxey is a high-priority add" in response.text
+    assert response.status_code == 404
 
 
 def test_player_page_smoke() -> None:
@@ -489,13 +696,17 @@ def test_compare_page_with_only_player_a() -> None:
 
 def test_compare_page_full_surface() -> None:
     client = build_client()
-    response = client.get("/compare?player_a_id=7&player_b_id=9&window=last_5")
+    response = client.get(
+        "/compare?player_a_id=7&player_b_id=9&window=last_7&focus=scoring"
+    )
 
     assert response.status_code == 200
     assert "Comparison Surface" in response.text
+    assert "Focus Scoring" in response.text
     assert "Mikal Bridges" in response.text
     assert "Limited comparison data." in response.text
     assert "Box Score Index" in response.text
+    assert "Last 7" in response.text
     assert "https://cdn.nba.com/headshots/nba/latest/1040x760/7.png" in response.text
 
 
@@ -516,6 +727,20 @@ def test_api_health_smoke() -> None:
     assert payload["status"] == "fresh"
     assert payload["last_successful_finished_at_utc"] == "2026-02-11T01:15:00+00:00"
     assert "latest_successful_run" not in payload
+
+
+def test_api_analysis_latest_includes_structured_sections() -> None:
+    client = build_client()
+    response = client.get("/api/analysis/latest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["season"] == "2025-26"
+    assert payload["item"]["trend_player"] == "Tyrese Maxey"
+    assert payload["item"]["score_contribution"]["player_points_share_of_team"] == 0.2768
+    assert payload["item"]["score_contribution"]["team_pts_qtr4"] == 30
+    assert payload["item"]["player_context"]["position"] == "G"
+    assert payload["item"]["player_context"]["roster_status"] is True
 
 
 def test_api_player_search_rejects_blank_query() -> None:
@@ -556,12 +781,16 @@ def test_api_player_detail_404() -> None:
 
 def test_api_compare_smoke() -> None:
     client = build_client()
-    response = client.get("/api/compare?player_a_id=7&player_b_id=9&window=last_5")
+    response = client.get(
+        "/api/compare?player_a_id=7&player_b_id=9&window=last_7&focus=scoring"
+    )
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["window"] == "last_5"
+    assert payload["window"] == "last_7"
+    assert payload["focus"] == "scoring"
     assert payload["comparison"]["player_a"]["player_name"] == "Tyrese Maxey"
+    assert payload["comparison"]["player_a"]["metric_rows"][1]["label"] == "PTS"
     assert payload["comparison"]["player_b"]["state"] == "unavailable"
 
 
@@ -571,3 +800,99 @@ def test_api_compare_rejects_duplicate_selection() -> None:
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Compare players must be different"
+
+
+def test_compare_page_logs_degraded_compare_side(caplog) -> None:
+    client = build_client()
+
+    with caplog.at_level("INFO", logger=LOGGER_NAME):
+        response = client.get("/compare?player_a_id=7&player_b_id=9&window=last_7")
+
+    assert response.status_code == 200
+    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    assert any(
+        event["panel"] == "compare_side"
+        and event["reason"] == "player_not_ranked"
+        and event["slot"] == "player_b"
+        for event in events
+    )
+
+
+def test_player_page_logs_degraded_panel_state(caplog) -> None:
+    client = build_client(MissingOpportunityRepository())
+
+    with caplog.at_level("INFO", logger=LOGGER_NAME):
+        response = client.get("/players/7")
+
+    assert response.status_code == 200
+    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    assert any(
+        event["panel"] == "opportunity"
+        and event["reason"] == "missing_schedule_context"
+        and event["player_id"] == 7
+        for event in events
+    )
+
+
+def test_home_page_logs_stale_freshness(caplog) -> None:
+    client = build_client(StaleRepository())
+
+    with caplog.at_level("INFO", logger=LOGGER_NAME):
+        response = client.get("/")
+
+    assert response.status_code == 200
+    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    assert any(
+        event["panel"] == "freshness_banner"
+        and event["reason"] == "stale_freshness"
+        and event["surface"] == "dashboard"
+        and event["as_of_date"] == "2026-02-11"
+        for event in events
+    )
+
+
+def test_api_player_game_log_success() -> None:
+    client = build_client()
+    response = client.get("/api/players/7/game-log")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["item"]["player_id"] == 7
+    assert payload["item"]["player_name"] == "Tyrese Maxey"
+    assert len(payload["item"]["games"]) > 0
+    assert "pts" in payload["item"]["games"][0]
+
+
+def test_api_player_game_log_with_limit() -> None:
+    client = build_client()
+    response = client.get("/api/players/7/game-log?limit=3")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["item"]["games"]) == 3
+
+
+def test_api_player_game_log_404() -> None:
+    client = build_client()
+    response = client.get("/api/players/999/game-log")
+
+    assert response.status_code == 404
+
+
+def test_visualize_page_smoke() -> None:
+    client = build_client()
+    response = client.get("/visualize")
+
+    assert response.status_code == 200
+    assert "Player Stats Explorer" in response.text
+    assert "chart.js" in response.text
+    assert "visualize.js" in response.text
+
+
+def test_visualize_page_with_player_id() -> None:
+    client = build_client()
+    response = client.get("/visualize?player_id=7")
+
+    assert response.status_code == 200
+    assert "Player Stats Explorer" in response.text
+    assert "__vizBootstrap" in response.text

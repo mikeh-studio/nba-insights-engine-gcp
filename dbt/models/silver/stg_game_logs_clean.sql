@@ -18,6 +18,7 @@ with source_data as (
 ),
 deduped as (
     select
+        cast(game_id as {{ varchar_type() }}) as game_id,
         date(game_date) as game_date,
         cast(matchup as {{ varchar_type() }}) as matchup,
         upper(cast(wl as {{ varchar_type() }})) as wl,
@@ -55,7 +56,7 @@ deduped as (
         {% if 'fg3m' in ns.column_names %}
         cast(fg3m as {{ float64_type() }}) as fg3m,
         {% else %}
-        cast(0 as {{ float64_type() }}) as fg3m,
+        cast(null as {{ float64_type() }}) as fg3m,
         {% endif %}
         {% if 'fg3a' in ns.column_names %}
         cast(fg3a as {{ float64_type() }}) as fg3a,
@@ -79,6 +80,7 @@ deduped as (
     from source_data
 )
 select
+    game_id,
     game_date,
     matchup,
     wl,

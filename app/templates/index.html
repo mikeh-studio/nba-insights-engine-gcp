@@ -3,25 +3,29 @@
   <section class="hero">
     <div class="hero-top">
       <div>
-        <div class="eyebrow">Discover</div>
         <h1>Stats Dashboard</h1>
       </div>
       <div class="hero-actions">
-        <span class="status">Freshness {{ health.status }}{% if health.age_hours is not none %} · {{ health.age_hours }}h{% endif %}</span>
+        <span class="status">Last refresh {% if health.last_successful_finished_at_utc %}{{ health.last_successful_finished_at_utc }}{% else %}unavailable{% endif %}</span>
       </div>
     </div>
-    <p class="subhead">
-      One signal board up front, then the fastest path into player detail, compare, and your tracked watchlist.
-    </p>
-    <div class="chip-row">
-      <span class="chip">Discovery-led</span>
-      <span class="chip">Schedule-aware</span>
-      <span class="chip">Reason-field driven</span>
+  </section>
+
+  <section class="card">
+    <div class="card-header">
+      <h2>Choose Day</h2>
+      <div class="meta">Latest 7 days</div>
     </div>
-    {% if health.status != "fresh" %}
-      <div class="notice">
-        <strong>Use the board with caution.</strong>
-        <p>The latest successful warehouse refresh{% if health.last_successful_finished_at_utc %} finished at {{ health.last_successful_finished_at_utc }}{% else %} is unavailable{% endif %}. Rankings and trends stay visible, but schedule-derived context may be stale or missing.</p>
+    {% if dashboard.date_options %}
+      <div class="chip-row">
+        {% for option in dashboard.date_options %}
+          <a class="button-link{% if not option.is_selected %} secondary{% endif %}" href="/?as_of_date={{ option.value }}">{{ option.label }}</a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <strong>No dashboard dates are available.</strong>
+        <p class="meta">The homepage will populate after the home dashboard model is built.</p>
       </div>
     {% endif %}
   </section>
@@ -31,74 +35,59 @@
       <article class="card">
         <div class="card-header">
           <h2>Signal Board</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
         </div>
-        <div class="signal-board">
-          {% for item in dashboard.signals %}
-            <article class="signal">
-              <div class="signal-top">
-                <div class="identity-row">
-                  <div class="player-avatar" aria-hidden="true">
-                    {% if item.headshot_url %}
-                      <img src="{{ item.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
-                    {% endif %}
-                    <span class="player-avatar-fallback"{% if item.headshot_url %} hidden{% endif %}>{{ item.player_initials }}</span>
+        {% if dashboard.signals %}
+          <div class="signal-board">
+            {% for item in dashboard.signals %}
+              <article class="signal">
+                <div class="signal-top">
+                  <div class="identity-row">
+                    <div class="player-avatar" aria-hidden="true">
+                      {% if item.headshot_url %}
+                        <img src="{{ item.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+                      {% endif %}
+                      <span class="player-avatar-fallback"{% if item.headshot_url %} hidden{% endif %}>{{ item.player_initials }}</span>
+                    </div>
+                    <div>
+                      <div class="meta">Top signal</div>
+                      <h3>{{ item.player_name }}</h3>
+                    </div>
                   </div>
-                  <div>
-                    <div class="meta">Top signal</div>
-                    <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
-                  </div>
+                  <div class="signal-rank">#{{ item.overall_rank }}</div>
                 </div>
-                <div class="signal-rank">#{{ item.overall_rank }}</div>
-              </div>
-              <p class="meta">{{ item.latest_team_abbr or "NBA" }} · score {{ item.recommendation_score }}</p>
-              {% if item.reason_summary %}
-                <p>{{ item.reason_summary }}</p>
-              {% endif %}
-              <div class="chip-row">
-                {% if item.category_strengths %}
-                  <span class="chip">Strengths {{ item.category_strengths }}</span>
-                {% endif %}
-                {% if item.category_risks %}
-                  <span class="chip">Risk {{ item.category_risks }}</span>
-                {% endif %}
-                <span class="chip">Trend {{ item.trend_status }}</span>
-              </div>
-              <div class="card-header-actions">
-                <a class="button-link secondary" href="/players/{{ item.player_id }}">Inspect</a>
-                <a class="button-link secondary" href="/compare?player_a_id={{ item.player_id }}">Compare</a>
-                <button
-                  class="track-button secondary"
-                  type="button"
-                  data-track-button
-                  data-player-id="{{ item.player_id }}"
-                >
-                  Track player
-                </button>
-              </div>
-            </article>
-          {% endfor %}
-        </div>
+                <p class="meta">{{ item.latest_team_abbr or "NBA" }} · score {{ item.recommendation_score }}</p>
+                <div class="chip-row">
+                  {% for improvement in item.top_improvements %}
+                    <span class="chip improvement">{{ improvement.label }} +{{ improvement.delta }}</span>
+                  {% endfor %}
+                  {% if item.category_strengths %}
+                    <span class="chip">Strengths {{ item.category_strengths }}</span>
+                  {% endif %}
+                  <span class="chip" title="Trend {{ item.trend_status }}">
+                    {% if item.trend_direction == "up" %}
+                      <span aria-hidden="true">&#8599;</span>
+                    {% elif item.trend_direction == "down" %}
+                      <span aria-hidden="true">&#8600;</span>
+                    {% else %}
+                      <span aria-hidden="true">&#8594;</span>
+                    {% endif %}
+                    <span class="sr-only">Trend {{ item.trend_status }}</span>
+                  </span>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>No signal board data is available.</strong>
+            <p class="meta">Pick another day or refresh the home dashboard model.</p>
+          </div>
+        {% endif %}
         <details class="explain">
           <summary>How this works</summary>
-          <p>Signals come from the dashboard read model, using bounded reason fields plus recent trend and next-seven-day context. The board stays visible even when freshness drops, but stale status is surfaced clearly above.</p>
+          <p>Signals come from the home dashboard snapshot for the selected day, using bounded reason fields, recent trend, and forward-looking schedule context from that day.</p>
         </details>
-      </article>
-
-      <article class="card tracked-rail" data-tracked-rail>
-        <div class="card-header">
-          <h2>Tracked Players</h2>
-          <div class="meta">Browser-local · cap {{ tracking_cap }}</div>
-        </div>
-        <p class="meta" data-tracked-summary>Track players to keep a short repeat-use watchlist under the discovery board.</p>
-        <div class="tracked-grid" data-tracked-grid></div>
-        <div class="empty-state" data-tracked-empty>
-          <strong>No tracked players yet.</strong>
-          <p class="meta">Track up to {{ tracking_cap }} players from the dashboard, detail, or compare surfaces.</p>
-        </div>
-        <div class="notice" data-tracked-cap-message hidden>
-          <strong>Tracked cap reached.</strong>
-          <p>You can keep up to {{ tracking_cap }} players in the browser-local watchlist for v1.</p>
-        </div>
       </article>
     </div>
 
@@ -106,36 +95,54 @@
       <article class="card">
         <div class="card-header">
           <h2>Trend Watch</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
         </div>
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Player</th>
-              <th>Status</th>
-              <th>Delta</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for item in dashboard.trends %}
+        {% if dashboard.trends %}
+          <table class="data-table">
+            <thead>
               <tr>
-                <td><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></td>
-                <td>{{ item.trend_status }}</td>
-                <td>{{ item.trend_delta }}</td>
+                <th>Player</th>
+                <th>Status</th>
+                <th>Delta</th>
               </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {% for item in dashboard.trends %}
+                <tr>
+                  <td>{{ item.player_name }}</td>
+                  <td title="Trend {{ item.trend_status }}">
+                    {% if item.trend_direction == "up" %}
+                      <span aria-hidden="true">&#8599;</span>
+                    {% elif item.trend_direction == "down" %}
+                      <span aria-hidden="true">&#8600;</span>
+                    {% else %}
+                      <span aria-hidden="true">&#8594;</span>
+                    {% endif %}
+                    <span class="sr-only">{{ item.trend_status }}</span>
+                  </td>
+                  <td>{{ item.trend_delta }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="empty-state">
+            <strong>No trend watch data is available.</strong>
+            <p class="meta">Recent performance deltas will appear after the daily home model is built.</p>
+          </div>
+        {% endif %}
       </article>
 
       <article class="card">
         <div class="card-header">
           <h2>Opportunity Board</h2>
+          <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
         </div>
         {% if dashboard.opportunity %}
           <div class="stack">
             {% for item in dashboard.opportunity %}
               <div>
-                <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
+                <h3>{{ item.player_name }}</h3>
                 <p class="meta">{{ item.games_next_7d }} games · {{ item.back_to_backs_next_7d }} back-to-backs</p>
                 <p>Opportunity score {{ item.opportunity_score }}{% if item.next_opponent_abbr %} · next {{ item.next_opponent_abbr }}{% endif %}</p>
               </div>
@@ -149,25 +156,8 @@
         {% endif %}
         <details class="explain">
           <summary>How this works</summary>
-          <p>Opportunity is based only on the upcoming schedule context. If that feed is missing, this panel degrades without collapsing the whole dashboard.</p>
+          <p>Opportunity is based on the next seven days after the selected day. If schedule context is missing, this panel degrades without collapsing the rest of the dashboard.</p>
         </details>
-      </article>
-
-      <article class="card">
-        <div class="card-header">
-          <h2>Snapshot</h2>
-        </div>
-        {% if analysis %}
-          <h3>{{ analysis.headline }}</h3>
-          <p class="meta">{{ analysis.snapshot_date }} · {{ analysis.snapshot_id }}</p>
-          <p>{{ analysis.dek }}</p>
-          <a class="button-link secondary" href="/analysis">Read snapshot</a>
-        {% else %}
-          <div class="empty-state">
-            <strong>No snapshot is available.</strong>
-            <p class="meta">The dashboard still runs from the workbench read models even when the narrative snapshot has not refreshed.</p>
-          </div>
-        {% endif %}
       </article>
     </aside>
   </section>

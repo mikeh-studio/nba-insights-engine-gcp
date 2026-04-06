@@ -124,6 +124,7 @@ def nba_analytics_pipeline():
                 "domain": "game_logs",
                 "gcs_uri": "",
                 "row_count": 0,
+                "game_ids": [],
                 "season": season,
                 "watermark_before": state["watermark_date"].isoformat()
                 if state["watermark_date"]
@@ -148,11 +149,91 @@ def nba_analytics_pipeline():
             "domain": "game_logs",
             "gcs_uri": gcs_uri,
             "row_count": len(incremental_df),
+            "game_ids": sorted(
+                {
+                    str(game_id)
+                    for game_id in incremental_df["GAME_ID"].dropna().astype(str).tolist()
+                    if game_id
+                }
+            ),
             "season": season,
             "watermark_before": state["watermark_date"].isoformat()
             if state["watermark_date"]
             else None,
             "watermark_after": watermark_after.isoformat() if watermark_after else None,
+        }
+
+    @task(retries=2, retry_delay=timedelta(minutes=5))
+    def extract_game_line_scores(game_log_result: dict) -> dict:
+        """Fetch team line scores for the incrementally changed game set."""
+        import pandas as pd
+        import nba_pipeline as pipeline
+
+        season = game_log_result["season"]
+        game_ids = game_log_result.get("game_ids", [])
+        project_id = get_project_id()
+        bucket_name = get_config("GCS_BUCKET_NAME")
+
+        if not game_ids:
+            return {
+                "domain": "game_line_scores",
+                "gcs_uri": "",
+                "row_count": 0,
+                "season": season,
+            }
+
+        line_scores = pipeline.get_all_game_line_scores(game_ids, season=season)
+        if line_scores.empty:
+            logger.info("No line score rows returned for candidate game_ids")
+            return {
+                "domain": "game_line_scores",
+                "gcs_uri": "",
+                "row_count": 0,
+                "season": season,
+            }
+
+        run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        min_date = pd.to_datetime(line_scores["GAME_DATE"]).min().strftime("%Y%m%d")
+        max_date = pd.to_datetime(line_scores["GAME_DATE"]).max().strftime("%Y%m%d")
+        blob_path = (
+            f"nba_data/{season}/landing/{run_stamp}_{min_date}_{max_date}_game_line_scores.csv"
+        )
+        gcs_uri = pipeline.upload_df_to_gcs(line_scores, project_id, bucket_name, blob_path)
+        return {
+            "domain": "game_line_scores",
+            "gcs_uri": gcs_uri,
+            "row_count": len(line_scores),
+            "season": season,
+        }
+
+    @task(retries=2, retry_delay=timedelta(minutes=5))
+    def extract_player_reference() -> dict:
+        """Fetch active-player reference attributes and roster context."""
+        import pandas as pd
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bucket_name = get_config("GCS_BUCKET_NAME")
+        max_players = int(get_config("NBA_MAX_PLAYERS", "0"))
+
+        active = pipeline.get_active_players()
+        selected = active if max_players <= 0 else active[:max_players]
+        reference_df = pipeline.get_all_player_references(selected)
+        if reference_df.empty:
+            logger.info("No player reference rows returned for active players")
+            return {
+                "domain": "player_reference",
+                "gcs_uri": "",
+                "row_count": 0,
+            }
+
+        run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        blob_path = f"nba_data/reference/landing/{run_stamp}_player_reference.csv"
+        gcs_uri = pipeline.upload_df_to_gcs(reference_df, project_id, bucket_name, blob_path)
+        return {
+            "domain": "player_reference",
+            "gcs_uri": gcs_uri,
+            "row_count": len(reference_df),
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=5))
@@ -278,6 +359,78 @@ def nba_analytics_pipeline():
             "gcs_uri": extract_result["gcs_uri"],
         }
 
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def load_game_line_score_staging(extract_result: dict) -> dict:
+        """Load landed game line score rows to staging."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        location = get_config("BQ_LOCATION", "US")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{bronze_dataset}", location)
+        staging_table = f"{project_id}.{bronze_dataset}.stg_game_line_scores"
+
+        if extract_result["row_count"] == 0:
+            return {
+                "domain": "game_line_scores",
+                "staging_table": staging_table,
+                "row_count": 0,
+                "season": extract_result["season"],
+                "gcs_uri": extract_result["gcs_uri"],
+            }
+
+        pipeline.load_gcs_to_bigquery(
+            client,
+            extract_result["gcs_uri"],
+            staging_table,
+            pipeline.get_game_line_scores_schema(),
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+        )
+        return {
+            "domain": "game_line_scores",
+            "staging_table": staging_table,
+            "row_count": extract_result["row_count"],
+            "season": extract_result["season"],
+            "gcs_uri": extract_result["gcs_uri"],
+        }
+
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def load_player_reference_staging(extract_result: dict) -> dict:
+        """Load landed player reference rows to staging."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        location = get_config("BQ_LOCATION", "US")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{bronze_dataset}", location)
+        staging_table = f"{project_id}.{bronze_dataset}.stg_player_reference"
+
+        if extract_result["row_count"] == 0:
+            return {
+                "domain": "player_reference",
+                "staging_table": staging_table,
+                "row_count": 0,
+                "gcs_uri": extract_result["gcs_uri"],
+            }
+
+        pipeline.load_gcs_to_bigquery(
+            client,
+            extract_result["gcs_uri"],
+            staging_table,
+            pipeline.get_player_reference_schema(),
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+        )
+        return {
+            "domain": "player_reference",
+            "staging_table": staging_table,
+            "row_count": extract_result["row_count"],
+            "gcs_uri": extract_result["gcs_uri"],
+        }
+
     @task(retries=0)
     def dq_game_log_staging(load_result: dict) -> dict:
         """Run hard DQ checks for game logs unless the run is a no-op."""
@@ -310,6 +463,41 @@ def nba_analytics_pipeline():
             client,
             load_result["staging_table"],
             season=SUPPORTED_SEASON,
+        )
+        return load_result
+
+    @task(retries=0)
+    def dq_game_line_score_staging(load_result: dict) -> dict:
+        """Run DQ checks for game line score rows."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        if load_result["row_count"] == 0:
+            load_result["dq_results"] = {}
+            return load_result
+
+        client = bq.Client(project=get_project_id())
+        load_result["dq_results"] = pipeline.run_game_line_score_quality_checks(
+            client,
+            load_result["staging_table"],
+            season=SUPPORTED_SEASON,
+        )
+        return load_result
+
+    @task(retries=0)
+    def dq_player_reference_staging(load_result: dict) -> dict:
+        """Run DQ checks for player reference rows."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        if load_result["row_count"] == 0:
+            load_result["dq_results"] = {}
+            return load_result
+
+        client = bq.Client(project=get_project_id())
+        load_result["dq_results"] = pipeline.run_player_reference_quality_checks(
+            client,
+            load_result["staging_table"],
         )
         return load_result
 
@@ -411,14 +599,113 @@ def nba_analytics_pipeline():
             "dq_results": load_result.get("dq_results", {}),
         }
 
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def merge_game_line_scores(load_result: dict) -> dict:
+        """Merge staged game line score rows into the bronze raw table."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        raw_table = f"{project_id}.{bronze_dataset}.raw_game_line_scores"
+
+        if load_result["row_count"] == 0:
+            return {
+                "domain": "game_line_scores",
+                "raw_table": raw_table,
+                "rows_loaded": 0,
+                "rows_inserted": 0,
+                "rows_updated": 0,
+                "season": load_result["season"],
+                "gcs_uri": load_result["gcs_uri"],
+                "dq_results": load_result.get("dq_results", {}),
+            }
+
+        client = bq.Client(project=project_id)
+        result = pipeline.create_and_merge_game_line_scores_table(
+            client, load_result["staging_table"], raw_table
+        )
+        reconciliation = pipeline.validate_merge_reconciliation(
+            domain="game_line_scores",
+            rows_loaded=load_result["row_count"],
+            pre_count=result["pre_count"],
+            post_count=result["post_count"],
+            inserted=result["inserted"],
+            updated=result["updated"],
+        )
+        return {
+            "domain": "game_line_scores",
+            "raw_table": raw_table,
+            "rows_loaded": load_result["row_count"],
+            "rows_inserted": result["inserted"],
+            "rows_updated": result["updated"],
+            "rows_unchanged": reconciliation["unchanged"],
+            "reconciliation": reconciliation,
+            "season": load_result["season"],
+            "gcs_uri": load_result["gcs_uri"],
+            "dq_results": load_result.get("dq_results", {}),
+        }
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def merge_player_reference(load_result: dict) -> dict:
+        """Merge staged player reference rows into the bronze raw table."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        raw_table = f"{project_id}.{bronze_dataset}.raw_player_reference"
+
+        if load_result["row_count"] == 0:
+            return {
+                "domain": "player_reference",
+                "raw_table": raw_table,
+                "rows_loaded": 0,
+                "rows_inserted": 0,
+                "rows_updated": 0,
+                "gcs_uri": load_result["gcs_uri"],
+                "dq_results": load_result.get("dq_results", {}),
+            }
+
+        client = bq.Client(project=project_id)
+        result = pipeline.create_and_merge_player_reference_table(
+            client, load_result["staging_table"], raw_table
+        )
+        reconciliation = pipeline.validate_merge_reconciliation(
+            domain="player_reference",
+            rows_loaded=load_result["row_count"],
+            pre_count=result["pre_count"],
+            post_count=result["post_count"],
+            inserted=result["inserted"],
+            updated=result["updated"],
+        )
+        return {
+            "domain": "player_reference",
+            "raw_table": raw_table,
+            "rows_loaded": load_result["row_count"],
+            "rows_inserted": result["inserted"],
+            "rows_updated": result["updated"],
+            "rows_unchanged": reconciliation["unchanged"],
+            "gcs_uri": load_result["gcs_uri"],
+            "dq_results": load_result.get("dq_results", {}),
+            "reconciliation": reconciliation,
+        }
+
     @task(retries=0)
-    def combine_pipeline_results(game_result: dict, schedule_result: dict) -> dict:
+    def combine_pipeline_results(
+        game_result: dict,
+        schedule_result: dict,
+        line_score_result: dict,
+        player_reference_result: dict,
+    ) -> dict:
         """Combine per-domain results into a single warehouse build context."""
         all_gcs = [
             value
             for value in [
                 game_result.get("gcs_uri", ""),
                 schedule_result.get("gcs_uri", ""),
+                line_score_result.get("gcs_uri", ""),
+                player_reference_result.get("gcs_uri", ""),
             ]
             if value
         ]
@@ -435,18 +722,34 @@ def nba_analytics_pipeline():
             "schedule_rows_inserted": schedule_result["rows_inserted"],
             "schedule_rows_updated": schedule_result["rows_updated"],
             "schedule_rows_unchanged": schedule_result.get("rows_unchanged", 0),
+            "line_score_rows_loaded": line_score_result["rows_loaded"],
+            "line_score_rows_inserted": line_score_result["rows_inserted"],
+            "line_score_rows_updated": line_score_result["rows_updated"],
+            "line_score_rows_unchanged": line_score_result.get("rows_unchanged", 0),
+            "player_reference_rows_loaded": player_reference_result["rows_loaded"],
+            "player_reference_rows_inserted": player_reference_result["rows_inserted"],
+            "player_reference_rows_updated": player_reference_result["rows_updated"],
+            "player_reference_rows_unchanged": player_reference_result.get(
+                "rows_unchanged", 0
+            ),
             "dq_results": {
                 "game_logs": game_result.get("dq_results", {}),
                 "schedule": schedule_result.get("dq_results", {}),
+                "game_line_scores": line_score_result.get("dq_results", {}),
+                "player_reference": player_reference_result.get("dq_results", {}),
             },
             "reconciliation": {
                 "game_logs": game_result.get("reconciliation", {}),
                 "schedule": schedule_result.get("reconciliation", {}),
+                "game_line_scores": line_score_result.get("reconciliation", {}),
+                "player_reference": player_reference_result.get("reconciliation", {}),
             },
             "should_build": any(
                 [
                     game_result["rows_loaded"] > 0,
                     schedule_result["rows_loaded"] > 0,
+                    line_score_result["rows_loaded"] > 0,
+                    player_reference_result["rows_loaded"] > 0,
                 ]
             ),
         }
@@ -548,6 +851,33 @@ def nba_analytics_pipeline():
             LIMIT 30
             """
         ).to_dataframe()
+        score_contribution = client.query(
+            f"""
+            SELECT *
+            FROM `{project_id}.{gold_dataset}.fct_player_scoring_contribution`
+            WHERE season = @season
+            ORDER BY game_date DESC, player_points_share_of_team DESC, player_pts DESC, player_name
+            LIMIT 30
+            """,
+            job_config=bq.QueryJobConfig(
+                query_parameters=[
+                    bq.ScalarQueryParameter("season", "STRING", merge_result["season"]),
+                ]
+            ),
+        ).to_dataframe()
+        player_context = client.query(
+            f"""
+            SELECT *
+            FROM `{project_id}.{gold_dataset}.dim_player`
+            WHERE latest_season = @season
+            ORDER BY player_id
+            """,
+            job_config=bq.QueryJobConfig(
+                query_parameters=[
+                    bq.ScalarQueryParameter("season", "STRING", merge_result["season"]),
+                ]
+            ),
+        ).to_dataframe()
         freshness_row = client.query(
             f"""
             SELECT MAX(ingested_at_utc) AS freshness_ts
@@ -570,6 +900,8 @@ def nba_analytics_pipeline():
             trends=trends,
             recommendations=recommendations,
             rankings=rankings,
+            score_contribution=score_contribution,
+            player_context=player_context,
             source_run_id=context["run_id"],
             created_at_utc=pd.Timestamp.now(tz="UTC"),
             snapshot_date=context["data_interval_end"],
@@ -612,7 +944,10 @@ def nba_analytics_pipeline():
             status="success",
             gcs_uri=run_result["gcs_uri"],
             rows_extracted=(
-                run_result["rows_loaded"] + run_result.get("schedule_rows_loaded", 0)
+                run_result["rows_loaded"]
+                + run_result.get("schedule_rows_loaded", 0)
+                + run_result.get("line_score_rows_loaded", 0)
+                + run_result.get("player_reference_rows_loaded", 0)
             ),
             rows_loaded=run_result["rows_loaded"],
             rows_inserted=run_result["rows_inserted"],
@@ -626,8 +961,12 @@ def nba_analytics_pipeline():
                 f"analysis_snapshot_status={run_result.get('analysis_snapshot_status', 'unknown')};"
                 f"analysis_snapshot_id={run_result.get('analysis_snapshot_id', '')};"
                 f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
+                f"line_score_rows_loaded={run_result.get('line_score_rows_loaded', 0)};"
+                f"player_reference_rows_loaded={run_result.get('player_reference_rows_loaded', 0)};"
                 f"rows_unchanged={run_result.get('rows_unchanged', 0)};"
                 f"schedule_rows_unchanged={run_result.get('schedule_rows_unchanged', 0)};"
+                f"line_score_rows_unchanged={run_result.get('line_score_rows_unchanged', 0)};"
+                f"player_reference_rows_unchanged={run_result.get('player_reference_rows_unchanged', 0)};"
                 f"redshift_status={run_result.get('redshift_status', get_config('ENABLE_REDSHIFT', 'false'))};"
                 f"dq={run_result.get('dq_results', {})};"
                 f"reconciliation={run_result.get('reconciliation', {})}"
@@ -638,15 +977,23 @@ def nba_analytics_pipeline():
 
     extracted = extract_incremental()
     extracted_schedule = extract_schedule_context()
+    extracted_line_scores = extract_game_line_scores(extracted)
+    extracted_player_reference = extract_player_reference()
 
     staged = load_game_log_staging(extracted)
     staged_schedule = load_schedule_staging(extracted_schedule)
+    staged_line_scores = load_game_line_score_staging(extracted_line_scores)
+    staged_player_reference = load_player_reference_staging(extracted_player_reference)
 
     checked = dq_game_log_staging(staged)
     checked_schedule = dq_schedule_staging(staged_schedule)
+    checked_line_scores = dq_game_line_score_staging(staged_line_scores)
+    checked_player_reference = dq_player_reference_staging(staged_player_reference)
 
     merged = merge_game_logs(checked)
     merged_schedule = merge_schedule_context(checked_schedule)
+    merged_line_scores = merge_game_line_scores(checked_line_scores)
+    merged_player_reference = merge_player_reference(checked_player_reference)
 
     @task.branch(retries=0)
     def check_redshift_enabled(combined_result: dict) -> str:
@@ -669,7 +1016,12 @@ def nba_analytics_pipeline():
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         gcs_prefix = f"redshift_sync/{run_stamp}"
 
-        for table in ["raw_game_logs", "raw_schedule"]:
+        for table in [
+            "raw_game_logs",
+            "raw_schedule",
+            "raw_game_line_scores",
+            "raw_player_reference",
+        ]:
             sync.export_bq_to_gcs_parquet(
                 project_id, bronze_dataset, table, gcs_bucket, gcs_prefix,
             )
@@ -686,7 +1038,12 @@ def nba_analytics_pipeline():
         s3_bucket = get_config("AWS_S3_BUCKET_NAME")
         gcs_prefix = combined_result["redshift_gcs_prefix"]
 
-        for table in ["raw_game_logs", "raw_schedule"]:
+        for table in [
+            "raw_game_logs",
+            "raw_schedule",
+            "raw_game_line_scores",
+            "raw_player_reference",
+        ]:
             sync.copy_gcs_to_s3(
                 gcs_bucket, f"{gcs_prefix}/{table}/",
                 s3_bucket, f"{gcs_prefix}/{table}",
@@ -710,6 +1067,8 @@ def nba_analytics_pipeline():
         tables = [
             {"name": "raw_game_logs", "keys": ["player_id", "game_date", "matchup"]},
             {"name": "raw_schedule", "keys": ["schedule_date", "team_abbr", "opponent_abbr"]},
+            {"name": "raw_game_line_scores", "keys": ["game_id", "team_id"]},
+            {"name": "raw_player_reference", "keys": ["player_id"]},
         ]
         for tbl in tables:
             sync.load_s3_to_redshift(
@@ -755,7 +1114,12 @@ def nba_analytics_pipeline():
         combined_result["redshift_status"] = "skipped"
         return combined_result
 
-    combined = combine_pipeline_results(merged, merged_schedule)
+    combined = combine_pipeline_results(
+        merged,
+        merged_schedule,
+        merged_line_scores,
+        merged_player_reference,
+    )
 
     # Redshift branch (optional, non-blocking)
     redshift_check = check_redshift_enabled(combined)

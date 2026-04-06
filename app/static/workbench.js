@@ -93,6 +93,10 @@ export function removeTrackedPlayer(payload, playerId) {
   };
 }
 
+export function buildCompareHref(playerAId, playerBId, window, focus = "balanced") {
+  return `/compare?player_a_id=${playerAId}&player_b_id=${playerBId}&window=${encodeURIComponent(window)}&focus=${encodeURIComponent(focus)}`;
+}
+
 function getStorage() {
   try {
     return globalThis.localStorage;
@@ -242,44 +246,6 @@ function setupTrackButtons() {
   });
 }
 
-function setupGlobalSearch() {
-  const form = document.getElementById("player-search-form");
-  if (!(form instanceof HTMLFormElement)) {
-    return;
-  }
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const input = form.querySelector('input[name="q"]');
-    const msg = document.getElementById("search-msg");
-    if (!(input instanceof HTMLInputElement) || !(msg instanceof HTMLElement)) {
-      return;
-    }
-    const query = input.value.trim();
-    if (!query) {
-      return;
-    }
-    msg.style.display = "none";
-    try {
-      const response = await fetch(`/api/players/search?q=${encodeURIComponent(query)}`);
-      const data = await response.json();
-      if (!response.ok) {
-        msg.textContent = data.detail || "Search failed";
-        msg.style.display = "inline";
-        return;
-      }
-      if (data.items && data.items.length > 0) {
-        globalThis.location.href = `/players/${data.items[0].player_id}`;
-        return;
-      }
-      msg.textContent = "No results found";
-      msg.style.display = "inline";
-    } catch {
-      msg.textContent = "Search failed";
-      msg.style.display = "inline";
-    }
-  });
-}
-
 function setupCompareSearch() {
   document.querySelectorAll("[data-compare-search-form]").forEach((formNode) => {
     if (!(formNode instanceof HTMLFormElement)) {
@@ -290,11 +256,13 @@ function setupCompareSearch() {
       const playerAId = Number(formNode.dataset.playerAId);
       const input = formNode.querySelector('input[name="q"]');
       const windowSelect = formNode.querySelector('select[name="window"]');
+      const focusSelect = formNode.querySelector('select[name="focus"]');
       const message = formNode.querySelector("[data-compare-search-message]");
       if (
         !Number.isInteger(playerAId) ||
         !(input instanceof HTMLInputElement) ||
         !(windowSelect instanceof HTMLSelectElement) ||
+        !(focusSelect instanceof HTMLSelectElement) ||
         !(message instanceof HTMLElement)
       ) {
         return;
@@ -316,7 +284,12 @@ function setupCompareSearch() {
           return;
         }
         const playerBId = data.items[0].player_id;
-        globalThis.location.href = `/compare?player_a_id=${playerAId}&player_b_id=${playerBId}&window=${encodeURIComponent(windowSelect.value)}`;
+        globalThis.location.href = buildCompareHref(
+          playerAId,
+          playerBId,
+          windowSelect.value,
+          focusSelect.value
+        );
       } catch {
         message.textContent = "Search failed";
       }
@@ -325,7 +298,6 @@ function setupCompareSearch() {
 }
 
 export function initWorkbench() {
-  setupGlobalSearch();
   setupTrackButtons();
   setupCompareSearch();
   const storage = getStorage();

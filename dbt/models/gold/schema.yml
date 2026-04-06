@@ -23,6 +23,8 @@ sources:
 models:
   - name: fct_player_game_stats
     columns:
+      - name: game_id
+        tests: [not_null]
       - name: player_id
         tests:
           - not_null
@@ -63,12 +65,45 @@ models:
     columns:
       - name: player_id
         tests: [not_null, unique]
+      - name: latest_team_abbr
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
       - name: latest_season
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['2025-26']
+  - name: fct_team_game_scores
+    columns:
+      - name: game_id
+        tests: [not_null]
+      - name: team_id
+        tests: [not_null]
+      - name: team_abbr
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
+      - name: team_pts
+        tests: [not_null]
+  - name: fct_player_scoring_contribution
+    columns:
+      - name: game_id
+        tests: [not_null]
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: player_points_share_of_team
+        tests: [not_null]
   - name: player_trends
     columns:
       - name: season
