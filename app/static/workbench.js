@@ -1,3 +1,11 @@
+function escHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 export const TRACKING_KEY = "nba_workbench_tracked_players_v1";
 export const TRACKING_VERSION = 1;
 export const TRACKING_CAP = 8;
@@ -110,9 +118,9 @@ function formatTrackedSummary(count, cap) {
 }
 
 function renderHeadshot(player) {
-  const initials = player.player_initials || "NBA";
+  const initials = escHtml(player.player_initials || "NBA");
   const imageMarkup = player.headshot_url
-    ? `<img src="${player.headshot_url}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />`
+    ? `<img src="${escHtml(player.headshot_url)}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />`
     : "";
   const fallbackHidden = player.headshot_url ? " hidden" : "";
   return `
@@ -134,19 +142,19 @@ function hydrateTrackedCard(item) {
         <div class="identity-row">
           ${renderHeadshot(player)}
           <div>
-            <h3><a href="/players/${player.player_id}">${player.player_name || "Unknown player"}</a></h3>
-            <p class="meta">${player.team_abbr || "NBA"} · ${state}</p>
+            <h3><a href="/players/${escHtml(player.player_id)}">${escHtml(player.player_name) || "Unknown player"}</a></h3>
+            <p class="meta">${escHtml(player.team_abbr) || "NBA"} · ${escHtml(state)}</p>
           </div>
         </div>
-        <button class="track-button secondary" type="button" data-track-button data-player-id="${player.player_id}">
+        <button class="track-button secondary" type="button" data-track-button data-player-id="${escHtml(player.player_id)}">
           Remove
         </button>
       </div>
-      <p>${reason}</p>
+      <p>${escHtml(reason)}</p>
       <div class="chip-row">
-        ${player.overall_rank ? `<span class="chip">Rank #${player.overall_rank}</span>` : `<span class="chip">Unranked</span>`}
-        ${player.recommendation_score ? `<span class="chip">Score ${player.recommendation_score}</span>` : ""}
-        <a class="button-link secondary" href="/compare?player_a_id=${player.player_id}">Compare</a>
+        ${player.overall_rank ? `<span class="chip">Rank #${escHtml(player.overall_rank)}</span>` : `<span class="chip">Unranked</span>`}
+        ${player.recommendation_score ? `<span class="chip">Score ${escHtml(player.recommendation_score)}</span>` : ""}
+        <a class="button-link secondary" href="/compare?player_a_id=${escHtml(player.player_id)}">Compare</a>
       </div>
     </article>
   `;
@@ -297,9 +305,63 @@ function setupCompareSearch() {
   });
 }
 
+async function doComparePlayerASearch(query, resultsEl) {
+  try {
+    const resp = await fetch(`/api/players/search?q=${encodeURIComponent(query)}`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (!data.items || data.items.length === 0) {
+      resultsEl.innerHTML = '<div class="viz-search-result"><span class="meta">No results</span></div>';
+      resultsEl.hidden = false;
+      return;
+    }
+    resultsEl.innerHTML = data.items
+      .map(
+        (p) =>
+          `<button class="viz-search-result" data-player-id="${escHtml(p.player_id)}">
+            ${escHtml(p.player_name)}
+            <span class="meta">${escHtml(p.latest_season)}</span>
+          </button>`
+      )
+      .join("");
+    resultsEl.hidden = false;
+    resultsEl.querySelectorAll(".viz-search-result[data-player-id]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        globalThis.location.href = `/compare?player_a_id=${btn.dataset.playerId}`;
+      });
+    });
+  } catch {
+    /* swallow */
+  }
+}
+
+function setupComparePlayerASearch() {
+  const input = document.querySelector("[data-compare-player-a-search]");
+  const resultsEl = document.getElementById("compare-player-a-results");
+  if (!input || !resultsEl) return;
+
+  let searchTimeout = null;
+
+  input.addEventListener("input", () => {
+    clearTimeout(searchTimeout);
+    const q = input.value.trim();
+    if (q.length < 2) { resultsEl.hidden = true; return; }
+    searchTimeout = setTimeout(() => doComparePlayerASearch(q, resultsEl), 280);
+  });
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") resultsEl.hidden = true;
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".compare-pa-search-row")) resultsEl.hidden = true;
+  });
+}
+
 export function initWorkbench() {
   setupTrackButtons();
   setupCompareSearch();
+  setupComparePlayerASearch();
   const storage = getStorage();
   if (!storage) {
     return;

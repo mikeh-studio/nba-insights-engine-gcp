@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal, Protocol
 
+from google.api_core.exceptions import GoogleAPIError as BQAPIError
 from google.cloud import bigquery
 
 from app.config import SUPPORTED_SEASON, Settings
@@ -599,13 +600,16 @@ class BigQueryWarehouseRepository:
         ORDER BY as_of_date DESC
         LIMIT 7
         """
-        return [
-            str(row["as_of_date"])
-            for row in self._query(
-                sql,
-                [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)],
-            )
-        ]
+        try:
+            return [
+                str(row["as_of_date"])
+                for row in self._query(
+                    sql,
+                    [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)],
+                )
+            ]
+        except BQAPIError:
+            return []
 
     def _resolve_home_as_of_date(self, requested: str | None) -> tuple[str | None, list[str]]:
         options = self._fetch_home_date_options()

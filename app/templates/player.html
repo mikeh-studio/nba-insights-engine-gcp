@@ -50,7 +50,7 @@
     {% if health.status != "fresh" %}
       <div class="notice">
         <strong>Player outlook is using degraded freshness.</strong>
-        <p>The latest successful warehouse refresh{% if health.last_successful_finished_at_utc %} finished at {{ health.last_successful_finished_at_utc }}{% else %} is unavailable{% endif %}. Read recent and opportunity context carefully.</p>
+        <p>The latest successful warehouse refresh was <span title="{{ health.last_successful_finished_at_utc or '' }}">{{ health.last_successful_finished_at_utc | time_ago }}</span>. Read recent and opportunity context carefully.</p>
       </div>
     {% endif %}
     {% if player_detail.availability_state != "fresh" %}

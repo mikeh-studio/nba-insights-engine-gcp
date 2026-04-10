@@ -788,7 +788,58 @@ def get_player_reference_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
     ]
 
+_BQ_TYPE_MAP = {
+    "INTEGER": "INT64",
+    "FLOAT": "FLOAT64",
+    "BOOLEAN": "BOOL",
+}
+_ALLOWED_DDL_TYPES = {
+    "INT64", "FLOAT64", "BOOL", "STRING", "DATE", "TIMESTAMP",
+    "DATETIME", "NUMERIC", "BIGNUMERIC", "BYTES", "JSON",
+}
 
+
+def schema_field_to_sql_type(field: bigquery.SchemaField) -> str:
+    """Map BigQuery schema field types to stable DDL type strings."""
+    type_name = field.field_type.upper()
+    mapped = _BQ_TYPE_MAP.get(type_name, type_name)
+    if mapped not in _ALLOWED_DDL_TYPES:
+        raise ValueError(f"Unsupported DDL type for column {field.name!r}: {mapped!r}")
+    return mapped
+
+
+def ensure_table_has_columns(
+    bq_client: bigquery.Client,
+    table_id: str,
+    schema: List[bigquery.SchemaField],
+) -> None:
+    """Add any missing columns from the expected schema to an existing table.
+
+    Each column is attempted independently so a single failure does not leave
+    the table in a partially-migrated state silently — errors are logged and
+    re-raised after all columns have been attempted.
+    """
+    errors = []
+    for field in schema:
+        alter_sql = (
+            f"ALTER TABLE `{table_id}` "
+            f"ADD COLUMN IF NOT EXISTS {field.name.lower()} {schema_field_to_sql_type(field)}"
+        )
+        try:
+            bq_client.query(alter_sql).result()
+        except Exception as exc:
+            logger.error(
+                "ensure_table_has_columns: failed to add column %s to %s: %s",
+                field.name,
+                table_id,
+                exc,
+            )
+            errors.append((field.name, exc))
+    if errors:
+        names = ", ".join(n for n, _ in errors)
+        raise RuntimeError(
+            f"ensure_table_has_columns: {len(errors)} column(s) failed for {table_id}: {names}"
+        )
 def load_gcs_to_bigquery(
     bq_client: bigquery.Client,
     gcs_uri: str,
@@ -1216,9 +1267,7 @@ def create_and_merge_raw_table(
     """
 
     bq_client.query(create_ddl).result()
-    bq_client.query(
-        f"ALTER TABLE `{raw_table}` ADD COLUMN IF NOT EXISTS game_id STRING"
-    ).result()
+    ensure_table_has_columns(bq_client, raw_table, get_game_logs_schema())
     pre_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
         .to_dataframe()
@@ -1353,6 +1402,7 @@ def create_and_merge_game_line_scores_table(
     """
 
     bq_client.query(create_ddl).result()
+    ensure_table_has_columns(bq_client, raw_table, get_game_line_scores_schema())
     pre_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
         .to_dataframe()
@@ -1491,6 +1541,7 @@ def create_and_merge_player_reference_table(
     """
 
     bq_client.query(create_ddl).result()
+    ensure_table_has_columns(bq_client, raw_table, get_player_reference_schema())
     pre_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
         .to_dataframe()
@@ -1737,6 +1788,7 @@ def create_and_merge_schedule_table(
       VALUES (S.schedule_date, S.game_id, S.season, S.team_abbr, S.opponent_abbr, S.home_away, S.is_back_to_back, S.game_status, S.source_updated_at_utc, S.ingested_at_utc)
     """
     bq_client.query(create_ddl).result()
+    ensure_table_has_columns(bq_client, raw_table, get_schedule_schema())
     pre_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
         .to_dataframe()

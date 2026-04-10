@@ -41,3 +41,4 @@ logs/
 
 # One-off artifacts
 reports/
+.gstack/

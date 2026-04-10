@@ -4,11 +4,43 @@
 ) }}
 
 {% set raw_game_logs_relation = source('bronze', 'raw_game_logs') %}
+{% set raw_game_logs_relation = get_required_relation(
+    raw_game_logs_relation,
+    [
+        'game_date',
+        'matchup',
+        'season',
+        'player_id',
+        'player_name',
+        'pts',
+        'reb',
+        'ast',
+        'stl',
+        'blk',
+        'tov',
+        'ingested_at_utc',
+    ]
+) %}
 {% set raw_game_logs_columns = adapter.get_columns_in_relation(raw_game_logs_relation) %}
 {% set ns = namespace(column_names=[]) %}
 {% for column in raw_game_logs_columns %}
   {% set ns.column_names = ns.column_names + [column.name | lower] %}
 {% endfor %}
+{% set derived_game_id_expression %}
+concat(
+    cast(date(game_date) as {{ varchar_type() }}),
+    '_',
+    least(
+        upper({{ regex_extract('matchup', "'^([A-Z]{2,3})'") }}),
+        upper({{ regex_extract('matchup', "'([A-Z]{2,3})$'") }})
+    ),
+    '_',
+    greatest(
+        upper({{ regex_extract('matchup', "'^([A-Z]{2,3})'") }}),
+        upper({{ regex_extract('matchup', "'([A-Z]{2,3})$'") }})
+    )
+)
+{% endset %}
 
 with source_data as (
     select *
@@ -18,7 +50,14 @@ with source_data as (
 ),
 deduped as (
     select
-        cast(game_id as {{ varchar_type() }}) as game_id,
+        {% if 'game_id' in ns.column_names %}
+        coalesce(
+            nullif(trim(cast(game_id as {{ varchar_type() }})), ''),
+            {{ derived_game_id_expression }}
+        ) as game_id,
+        {% else %}
+        {{ derived_game_id_expression }} as game_id,
+        {% endif %}
         date(game_date) as game_date,
         cast(matchup as {{ varchar_type() }}) as matchup,
         upper(cast(wl as {{ varchar_type() }})) as wl,

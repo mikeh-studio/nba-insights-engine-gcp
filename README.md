@@ -107,6 +107,10 @@ The service reads only from gold tables and metadata tables. It is public read-o
 
 Freshness is reported from the latest successful pipeline run in `nba_metadata.pipeline_run_log`, evaluated against a daily freshness threshold.
 
+UI freshness states now render as relative time labels (for example, "2 days ago") with the exact ISO timestamp preserved in the hover title.
+
+The compare page supports two entry modes: direct `player_a_id` deep links and first-player search when no initial player is provided.
+
 `/api/analysis/latest` now returns the existing narrative fields plus nested `score_contribution` and `player_context` sections sourced from the expanded snapshot record.
 
 ## Local Setup

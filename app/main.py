@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -26,6 +27,32 @@ from app.telemetry import (
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 TRACKING_CAP = 8
+
+
+def _time_ago(value: str | None) -> str:
+    if not value:
+        return "unavailable"
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        diff = datetime.now(UTC) - dt
+        seconds = int(diff.total_seconds())
+        if seconds < 60:
+            return "just now"
+        if seconds < 3600:
+            m = seconds // 60
+            return f"{m} minute{'s' if m != 1 else ''} ago"
+        if seconds < 86400:
+            h = seconds // 3600
+            return f"{h} hour{'s' if h != 1 else ''} ago"
+        d = seconds // 86400
+        return f"{d} day{'s' if d != 1 else ''} ago"
+    except (ValueError, TypeError):
+        return str(value)
+
+
+templates.env.filters["time_ago"] = _time_ago
 
 app = FastAPI(title="NBA 2025-26 Public API", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")

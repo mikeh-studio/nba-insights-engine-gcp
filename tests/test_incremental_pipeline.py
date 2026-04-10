@@ -253,6 +253,38 @@ def test_game_logs_schema_includes_game_id():
     assert schema_names[0] == "GAME_ID"
 
 
+def test_ensure_table_has_columns_adds_expected_columns():
+    class DummyJob:
+        def result(self):
+            return None
+
+    class DummyClient:
+        def __init__(self):
+            self.statements = []
+
+        def query(self, statement):
+            self.statements.append(statement)
+            return DummyJob()
+
+    client = DummyClient()
+
+    pipeline.ensure_table_has_columns(
+        client,
+        "project.dataset.raw_game_logs",
+        [
+            pipeline.bigquery.SchemaField("GAME_ID", "STRING"),
+            pipeline.bigquery.SchemaField("FGM", "FLOAT"),
+            pipeline.bigquery.SchemaField("PLAYER_ID", "INTEGER"),
+            pipeline.bigquery.SchemaField("ROSTER_STATUS", "BOOLEAN"),
+        ],
+    )
+
+    assert client.statements == [
+        "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS game_id STRING",
+        "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS fgm FLOAT64",
+        "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS player_id INT64",
+        "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS roster_status BOOL",
+    ]
 def test_get_all_game_line_scores_dedupes_by_game_and_team(monkeypatch):
     def fake_get_game_line_scores(game_id: str, *, season: str = "2025-26"):
         return pd.DataFrame(
