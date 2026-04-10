@@ -24,7 +24,12 @@ models:
   - name: fct_player_game_stats
     columns:
       - name: game_id
-        tests: [not_null]
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_id
       - name: player_id
         tests:
           - not_null
@@ -38,12 +43,20 @@ models:
           - accepted_values:
               arguments:
                 values: &nba_team_abbrs ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DAL', 'DEN', 'DET', 'GSW', 'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK', 'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
       - name: opponent_abbr
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
       - name: season
         tests:
           - not_null
@@ -71,16 +84,76 @@ models:
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
       - name: latest_season
         tests:
           - not_null
           - accepted_values:
               arguments:
                 values: ['2025-26']
+  - name: dim_team
+    columns:
+      - name: team_abbr
+        tests:
+          - not_null
+          - unique
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
+      - name: team_id
+        tests: [not_null, unique]
+      - name: team_city_name
+        tests: [not_null]
+      - name: team_nickname
+        tests: [not_null]
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+  - name: dim_game
+    columns:
+      - name: game_id
+        tests: [not_null, unique]
+      - name: game_date
+        tests: [not_null]
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: home_team_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+      - name: away_team_abbr
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+      - name: home_team_pts
+        tests: [not_null]
+      - name: away_team_pts
+        tests: [not_null]
   - name: fct_team_game_scores
     columns:
       - name: game_id
-        tests: [not_null]
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_id
       - name: team_id
         tests: [not_null]
       - name: team_abbr
@@ -89,12 +162,31 @@ models:
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
+      - name: opponent_team_abbr
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
       - name: team_pts
         tests: [not_null]
   - name: fct_player_scoring_contribution
     columns:
       - name: game_id
-        tests: [not_null]
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_game')
+                field: game_id
       - name: player_id
         tests:
           - not_null
@@ -148,6 +240,10 @@ models:
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
   - name: player_category_profile
     columns:
       - name: player_id
@@ -159,6 +255,10 @@ models:
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
       - name: category_coverage_status
         tests:
           - accepted_values:
@@ -176,6 +276,10 @@ models:
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_abbr
   - name: player_fantasy_rankings
     columns:
       - name: player_id

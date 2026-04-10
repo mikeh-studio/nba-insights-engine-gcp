@@ -632,7 +632,8 @@ def test_home_page_shows_stale_notice() -> None:
 
     assert response.status_code == 200
     assert "Use the board with caution." not in response.text
-    assert "Last refresh 2026-02-09T12:00:00+00:00" in response.text
+    assert "Last refresh" in response.text
+    assert 'title="2026-02-09T12:00:00+00:00"' in response.text
 
 
 def test_home_page_missing_opportunity_state() -> None:

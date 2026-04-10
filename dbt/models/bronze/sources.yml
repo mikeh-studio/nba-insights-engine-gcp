@@ -37,9 +37,17 @@ sources:
           - name: schedule_date
             tests: [not_null]
           - name: team_abbr
-            tests: [not_null]
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: &nba_team_abbrs ['ATL', 'BOS', 'BKN', 'CHA', 'CHI', 'CLE', 'DAL', 'DEN', 'DET', 'GSW', 'HOU', 'IND', 'LAC', 'LAL', 'MEM', 'MIA', 'MIL', 'MIN', 'NOP', 'NYK', 'OKC', 'ORL', 'PHI', 'PHX', 'POR', 'SAC', 'SAS', 'TOR', 'UTA', 'WAS']
           - name: opponent_abbr
-            tests: [not_null]
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: *nba_team_abbrs
       - name: raw_game_line_scores
         columns:
           - name: game_id
@@ -47,7 +55,11 @@ sources:
           - name: team_id
             tests: [not_null]
           - name: team_abbr
-            tests: [not_null]
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: *nba_team_abbrs
           - name: season
             tests:
               - not_null
@@ -57,6 +69,6 @@ sources:
       - name: raw_player_reference
         columns:
           - name: player_id
-            tests: [not_null]
+            tests: [not_null, unique]
           - name: player_name
             tests: [not_null]

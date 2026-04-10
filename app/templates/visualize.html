@@ -8,14 +8,14 @@
       </div>
       <div class="hero-actions">
         {% if health.status == "stale" %}
-          <span class="status">Last refresh {{ health.last_successful_finished_at_utc }}</span>
+          <span class="status" title="{{ health.last_successful_finished_at_utc or '' }}">Last refresh {{ health.last_successful_finished_at_utc | time_ago }}</span>
         {% elif health.status == "fresh" %}
           <span class="status">Data fresh</span>
         {% endif %}
       </div>
     </div>
     <p class="subhead">
-      Select a player, choose stats, and explore performance through trend lines, bar comparisons, and radar profiles.
+      Select a player, choose stats, and explore performance through trend lines, window averages, and radar profiles.
     </p>
   </section>
 
@@ -55,7 +55,7 @@
 
         <div class="viz-chart-tabs" id="viz-chart-tabs">
           <button class="button viz-tab active" data-chart="trend">Trend</button>
-          <button class="button secondary viz-tab" data-chart="compare">Compare</button>
+          <button class="button secondary viz-tab" data-chart="compare">Windows</button>
           <button class="button secondary viz-tab" data-chart="profile">Profile</button>
         </div>
       </div>
