@@ -222,6 +222,8 @@ class FakeRepository(WarehouseRepository):
                     "recent_form": "fresh",
                     "category_profile": "fresh",
                     "opportunity": "fresh",
+                    "archetype": "fresh",
+                    "similarity": "fresh",
                 },
                 "recent_form": [
                     {
@@ -291,6 +293,28 @@ class FakeRepository(WarehouseRepository):
                     "next_game_date": "2026-02-13",
                     "opportunity_score": 84.0,
                 },
+                "archetype": {
+                    "state": "fresh",
+                    "archetype_id": "cluster_2",
+                    "archetype_label": "Primary Creator",
+                    "cluster_confidence": 0.92,
+                    "top_traits": ["playmaking", "usage share", "scoring volume"],
+                    "summary": "Primary Creator driven by playmaking, usage share, scoring volume.",
+                },
+                "similarity_reason": None,
+                "similar_players": [
+                    {
+                        "player_id": 11,
+                        "player_name": "Jalen Brunson",
+                        "team_abbr": "NYK",
+                        "headshot_url": "https://cdn.nba.com/headshots/nba/latest/1040x760/11.png",
+                        "player_initials": "JB",
+                        "similarity_score": 0.91,
+                        "archetype_label": "Primary Creator",
+                        "shared_traits": ["playmaking", "usage share"],
+                        "contrasting_traits": ["three-point volume"],
+                    }
+                ],
             }
         if player_id == 9:
             return {
@@ -321,10 +345,22 @@ class FakeRepository(WarehouseRepository):
                     "recent_form": "unavailable",
                     "category_profile": "unavailable",
                     "opportunity": "unavailable",
+                    "archetype": "unavailable",
+                    "similarity": "unavailable",
                 },
                 "recent_form": [],
                 "category_profile": [],
                 "opportunity": None,
+                "archetype": {
+                    "state": "unavailable",
+                    "archetype_id": None,
+                    "archetype_label": None,
+                    "cluster_confidence": None,
+                    "top_traits": [],
+                    "summary": None,
+                },
+                "similarity_reason": "Similarity profile is unavailable.",
+                "similar_players": [],
             }
         return None
 
@@ -417,7 +453,9 @@ class FakeRepository(WarehouseRepository):
         }
         row_labels = focus_rows.get(focus, focus_rows["balanced"])
 
-        def metric_rows(metric_values: dict[str, float | None]) -> list[dict[str, object]]:
+        def metric_rows(
+            metric_values: dict[str, float | None]
+        ) -> list[dict[str, object]]:
             label_to_key = {
                 "Box Score Index": "fantasy_proxy_score",
                 "Minutes": "avg_min",
@@ -467,6 +505,15 @@ class FakeRepository(WarehouseRepository):
             "focus": focus,
             "focus_label": focus.title(),
             "focus_description": "Focus description for tests.",
+            "similarity": {
+                "state": "fresh",
+                "score": 0.81,
+                "summary": "Archetypes diverge: Primary Creator vs Two-Way Wing. Current stat-profile similarity is 0.81.",
+                "same_archetype": False,
+                "archetype_labels": ["Primary Creator", "Two-Way Wing"],
+                "shared_traits": ["scoring volume"],
+                "contrasting_traits": ["rim protection"],
+            },
             "comparison": {
                 "player_a": {
                     "player_id": player_a_id,
@@ -672,9 +719,13 @@ def test_player_page_smoke() -> None:
 
     assert response.status_code == 200
     assert "Why This Player Matters" in response.text
+    assert "Archetype" in response.text
+    assert "Similar Players" in response.text
     assert "Compare player" in response.text
     assert "Recent Windows" in response.text
     assert "Box Score Index" in response.text
+    assert "Primary Creator" in response.text
+    assert "Jalen Brunson" in response.text
     assert "https://cdn.nba.com/headshots/nba/latest/1040x760/7.png" in response.text
 
 
@@ -706,6 +757,7 @@ def test_compare_page_full_surface() -> None:
     assert "Focus Scoring" in response.text
     assert "Mikal Bridges" in response.text
     assert "Limited comparison data." in response.text
+    assert "Stat-profile similarity." in response.text
     assert "Box Score Index" in response.text
     assert "Last 7" in response.text
     assert "https://cdn.nba.com/headshots/nba/latest/1040x760/7.png" in response.text
@@ -738,7 +790,9 @@ def test_api_analysis_latest_includes_structured_sections() -> None:
     payload = response.json()
     assert payload["season"] == "2025-26"
     assert payload["item"]["trend_player"] == "Tyrese Maxey"
-    assert payload["item"]["score_contribution"]["player_points_share_of_team"] == 0.2768
+    assert (
+        payload["item"]["score_contribution"]["player_points_share_of_team"] == 0.2768
+    )
     assert payload["item"]["score_contribution"]["team_pts_qtr4"] == 30
     assert payload["item"]["player_context"]["position"] == "G"
     assert payload["item"]["player_context"]["roster_status"] is True
@@ -761,6 +815,8 @@ def test_api_player_detail_available_player() -> None:
     assert payload["item"]["availability_state"] == "fresh"
     assert payload["item"]["player"]["overall_rank"] == 12
     assert payload["item"]["player"]["headshot_url"].endswith("/7.png")
+    assert payload["item"]["archetype"]["archetype_label"] == "Primary Creator"
+    assert payload["item"]["similar_players"][0]["player_name"] == "Jalen Brunson"
 
 
 def test_api_player_detail_unavailable_known_player() -> None:
@@ -790,6 +846,7 @@ def test_api_compare_smoke() -> None:
     payload = response.json()
     assert payload["window"] == "last_7"
     assert payload["focus"] == "scoring"
+    assert payload["similarity"]["state"] == "fresh"
     assert payload["comparison"]["player_a"]["player_name"] == "Tyrese Maxey"
     assert payload["comparison"]["player_a"]["metric_rows"][1]["label"] == "PTS"
     assert payload["comparison"]["player_b"]["state"] == "unavailable"
@@ -810,7 +867,11 @@ def test_compare_page_logs_degraded_compare_side(caplog) -> None:
         response = client.get("/compare?player_a_id=7&player_b_id=9&window=last_7")
 
     assert response.status_code == 200
-    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if "panel_degraded" in record.message
+    ]
     assert any(
         event["panel"] == "compare_side"
         and event["reason"] == "player_not_ranked"
@@ -826,7 +887,11 @@ def test_player_page_logs_degraded_panel_state(caplog) -> None:
         response = client.get("/players/7")
 
     assert response.status_code == 200
-    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if "panel_degraded" in record.message
+    ]
     assert any(
         event["panel"] == "opportunity"
         and event["reason"] == "missing_schedule_context"
@@ -842,7 +907,11 @@ def test_home_page_logs_stale_freshness(caplog) -> None:
         response = client.get("/")
 
     assert response.status_code == 200
-    events = [json.loads(record.message) for record in caplog.records if "panel_degraded" in record.message]
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if "panel_degraded" in record.message
+    ]
     assert any(
         event["panel"] == "freshness_banner"
         and event["reason"] == "stale_freshness"

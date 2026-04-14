@@ -152,7 +152,10 @@ def nba_analytics_pipeline():
             "game_ids": sorted(
                 {
                     str(game_id)
-                    for game_id in incremental_df["GAME_ID"].dropna().astype(str).tolist()
+                    for game_id in incremental_df["GAME_ID"]
+                    .dropna()
+                    .astype(str)
+                    .tolist()
                     if game_id
                 }
             ),
@@ -195,10 +198,10 @@ def nba_analytics_pipeline():
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         min_date = pd.to_datetime(line_scores["GAME_DATE"]).min().strftime("%Y%m%d")
         max_date = pd.to_datetime(line_scores["GAME_DATE"]).max().strftime("%Y%m%d")
-        blob_path = (
-            f"nba_data/{season}/landing/{run_stamp}_{min_date}_{max_date}_game_line_scores.csv"
+        blob_path = f"nba_data/{season}/landing/{run_stamp}_{min_date}_{max_date}_game_line_scores.csv"
+        gcs_uri = pipeline.upload_df_to_gcs(
+            line_scores, project_id, bucket_name, blob_path
         )
-        gcs_uri = pipeline.upload_df_to_gcs(line_scores, project_id, bucket_name, blob_path)
         return {
             "domain": "game_line_scores",
             "gcs_uri": gcs_uri,
@@ -229,7 +232,9 @@ def nba_analytics_pipeline():
 
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         blob_path = f"nba_data/reference/landing/{run_stamp}_player_reference.csv"
-        gcs_uri = pipeline.upload_df_to_gcs(reference_df, project_id, bucket_name, blob_path)
+        gcs_uri = pipeline.upload_df_to_gcs(
+            reference_df, project_id, bucket_name, blob_path
+        )
         return {
             "domain": "player_reference",
             "gcs_uri": gcs_uri,
@@ -795,6 +800,74 @@ def nba_analytics_pipeline():
         return merge_result
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
+    def build_player_similarity_assets(merge_result: dict) -> dict:
+        """Train archetype clusters and publish normalized similarity vectors."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        merge_result["similarity_status"] = "skipped"
+        merge_result["similarity_player_count"] = 0
+        merge_result["similarity_archetype_count"] = 0
+
+        if (
+            not merge_result["should_build"]
+            or merge_result.get("dbt_status") != "success"
+        ):
+            logger.info(
+                "Skipping player similarity publish because dbt did not complete"
+            )
+            return merge_result
+
+        project_id = get_project_id()
+        gold_dataset = get_dataset("BQ_DATASET_GOLD", "nba_gold")
+        location = get_config("BQ_LOCATION", "US")
+        cluster_count = int(get_config("NBA_ARCHETYPE_CLUSTERS", "6"))
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{gold_dataset}", location)
+
+        feature_input_table = (
+            f"{project_id}.{gold_dataset}.player_similarity_feature_input"
+        )
+        feature_output_table = f"{project_id}.{gold_dataset}.player_similarity_features"
+        archetype_table = f"{project_id}.{gold_dataset}.player_archetypes"
+
+        feature_input = client.query(
+            f"""
+            SELECT *
+            FROM `{feature_input_table}`
+            WHERE season = @season
+            """,
+            job_config=bq.QueryJobConfig(
+                query_parameters=[
+                    bq.ScalarQueryParameter("season", "STRING", merge_result["season"]),
+                ]
+            ),
+        ).to_dataframe()
+        if feature_input.empty:
+            logger.info(
+                "No player similarity feature rows were available after dbt build"
+            )
+            return merge_result
+
+        outputs = pipeline.build_player_similarity_outputs(
+            feature_input,
+            cluster_count=cluster_count,
+        )
+        pipeline.write_player_similarity_tables(
+            client,
+            features_table_id=feature_output_table,
+            archetypes_table_id=archetype_table,
+            features_df=outputs["features"],
+            archetypes_df=outputs["archetypes"],
+        )
+        merge_result["similarity_status"] = "success"
+        merge_result["similarity_player_count"] = len(outputs["features"])
+        merge_result["similarity_archetype_count"] = outputs["archetypes"][
+            "archetype_label"
+        ].nunique()
+        return merge_result
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
     def build_analysis_snapshot(merge_result: dict) -> dict:
         """Create or update the deterministic gold analysis snapshot."""
         import pandas as pd
@@ -958,6 +1031,9 @@ def nba_analytics_pipeline():
             finished_at_utc=datetime.now(tz=context["data_interval_start"].tzinfo),
             details=(
                 f"dbt_status={run_result.get('dbt_status', 'unknown')};"
+                f"similarity_status={run_result.get('similarity_status', 'unknown')};"
+                f"similarity_player_count={run_result.get('similarity_player_count', 0)};"
+                f"similarity_archetype_count={run_result.get('similarity_archetype_count', 0)};"
                 f"analysis_snapshot_status={run_result.get('analysis_snapshot_status', 'unknown')};"
                 f"analysis_snapshot_id={run_result.get('analysis_snapshot_id', '')};"
                 f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
@@ -1023,7 +1099,11 @@ def nba_analytics_pipeline():
             "raw_player_reference",
         ]:
             sync.export_bq_to_gcs_parquet(
-                project_id, bronze_dataset, table, gcs_bucket, gcs_prefix,
+                project_id,
+                bronze_dataset,
+                table,
+                gcs_bucket,
+                gcs_prefix,
             )
 
         combined_result["redshift_gcs_prefix"] = gcs_prefix
@@ -1045,8 +1125,10 @@ def nba_analytics_pipeline():
             "raw_player_reference",
         ]:
             sync.copy_gcs_to_s3(
-                gcs_bucket, f"{gcs_prefix}/{table}/",
-                s3_bucket, f"{gcs_prefix}/{table}",
+                gcs_bucket,
+                f"{gcs_prefix}/{table}/",
+                s3_bucket,
+                f"{gcs_prefix}/{table}",
             )
 
         combined_result["redshift_s3_prefix"] = gcs_prefix
@@ -1066,14 +1148,20 @@ def nba_analytics_pipeline():
 
         tables = [
             {"name": "raw_game_logs", "keys": ["player_id", "game_date", "matchup"]},
-            {"name": "raw_schedule", "keys": ["schedule_date", "team_abbr", "opponent_abbr"]},
+            {
+                "name": "raw_schedule",
+                "keys": ["schedule_date", "team_abbr", "opponent_abbr"],
+            },
             {"name": "raw_game_line_scores", "keys": ["game_id", "team_id"]},
             {"name": "raw_player_reference", "keys": ["player_id"]},
         ]
         for tbl in tables:
             sync.load_s3_to_redshift(
-                s3_bucket, f"{s3_prefix}/{tbl['name']}/",
-                schema, tbl["name"], iam_role,
+                s3_bucket,
+                f"{s3_prefix}/{tbl['name']}/",
+                schema,
+                tbl["name"],
+                iam_role,
             )
             sync.merge_redshift_staging(schema, tbl["name"], tbl["keys"])
             sync.run_redshift_dq_checks(schema, tbl["name"], tbl["keys"])
@@ -1133,7 +1221,8 @@ def nba_analytics_pipeline():
 
     # Main pipeline continues regardless of Redshift outcome
     modeled = dbt_build(combined)
-    snapshotted = build_analysis_snapshot(modeled)
+    similarity_built = build_player_similarity_assets(modeled)
+    snapshotted = build_analysis_snapshot(similarity_built)
     publish_run_metrics(snapshotted)
 
 

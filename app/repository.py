@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from math import sqrt
 from typing import Any, Literal, Protocol
 
 from google.api_core.exceptions import GoogleAPIError as BQAPIError
@@ -99,6 +100,42 @@ COMPARE_FOCUS_CONFIG: dict[CompareFocus, dict[str, Any]] = {
             "avg_tov",
         ],
     },
+}
+
+SIMILARITY_RESULT_LIMIT = 6
+SIMILARITY_FEATURE_COLUMNS = [
+    "season_avg_pts",
+    "season_avg_reb",
+    "season_avg_ast",
+    "season_avg_stl",
+    "season_avg_blk",
+    "season_avg_fg3m",
+    "season_avg_tov",
+    "season_avg_min",
+    "recent_pts",
+    "recent_reb",
+    "recent_ast",
+    "recent_stl",
+    "recent_blk",
+    "recent_fg3m",
+    "recent_tov",
+    "recent_min",
+    "recent_points_share_of_team",
+    "recent_points_share_of_game",
+    "minutes_delta_vs_season",
+]
+
+SIMILARITY_TRAIT_LABELS: dict[str, str] = {
+    "season_avg_pts": "scoring volume",
+    "season_avg_reb": "rebounding",
+    "season_avg_ast": "playmaking",
+    "season_avg_stl": "steals pressure",
+    "season_avg_blk": "rim protection",
+    "season_avg_fg3m": "three-point volume",
+    "season_avg_min": "minutes load",
+    "recent_points_share_of_team": "usage share",
+    "recent_points_share_of_game": "game scoring share",
+    "minutes_delta_vs_season": "minutes trend",
 }
 
 
@@ -281,10 +318,7 @@ def _build_top_improvement_chips(row: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         deltas.append((label, round(value, 1)))
     deltas.sort(key=lambda item: item[1], reverse=True)
-    return [
-        {"label": label, "delta": value}
-        for label, value in deltas[:3]
-    ]
+    return [{"label": label, "delta": value} for label, value in deltas[:3]]
 
 
 def _sanitize_category_list(value: Any) -> str | None:
@@ -295,6 +329,63 @@ def _sanitize_category_list(value: Any) -> str | None:
     if not filtered:
         return None
     return ", ".join(filtered)
+
+
+def _split_display_list(value: Any) -> list[str]:
+    if not isinstance(value, str) or not value.strip():
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _similarity_state_from_sample_status(sample_status: Any) -> str:
+    if sample_status == "insufficient_sample":
+        return STATE_INSUFFICIENT_SAMPLE
+    if sample_status in ("ready", "limited_sample"):
+        return STATE_FRESH
+    return STATE_UNAVAILABLE
+
+
+def _similarity_feature_value(row: dict[str, Any], feature_name: str) -> float | None:
+    return _to_float(row.get(f"norm_{feature_name}"))
+
+
+def _shared_similarity_traits(
+    anchor_row: dict[str, Any], candidate_row: dict[str, Any], *, limit: int = 3
+) -> list[str]:
+    ranked: list[tuple[str, float, float]] = []
+    for feature_name, label in SIMILARITY_TRAIT_LABELS.items():
+        anchor_value = _similarity_feature_value(anchor_row, feature_name)
+        candidate_value = _similarity_feature_value(candidate_row, feature_name)
+        if anchor_value is None or candidate_value is None:
+            continue
+        if anchor_value <= 0 or candidate_value <= 0:
+            continue
+        diff = abs(anchor_value - candidate_value)
+        strength = ((anchor_value + candidate_value) / 2.0) - diff
+        if strength <= 0:
+            continue
+        ranked.append((label, strength, diff))
+
+    ranked.sort(key=lambda item: (item[1], -item[2]), reverse=True)
+    return [label for label, _, _ in ranked[:limit]]
+
+
+def _contrasting_similarity_traits(
+    anchor_row: dict[str, Any], candidate_row: dict[str, Any], *, limit: int = 2
+) -> list[str]:
+    ranked: list[tuple[str, float]] = []
+    for feature_name, label in SIMILARITY_TRAIT_LABELS.items():
+        anchor_value = _similarity_feature_value(anchor_row, feature_name)
+        candidate_value = _similarity_feature_value(candidate_row, feature_name)
+        if anchor_value is None or candidate_value is None:
+            continue
+        difference = abs(anchor_value - candidate_value)
+        if difference < 0.75:
+            continue
+        ranked.append((label, difference))
+
+    ranked.sort(key=lambda item: item[1], reverse=True)
+    return [label for label, _ in ranked[:limit]]
 
 
 def _trend_direction(status: Any) -> str:
@@ -504,9 +595,7 @@ class BigQueryWarehouseRepository:
         return rows
 
     def _dashboard_table(self) -> str:
-        return (
-            f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_dashboard`"
-        )
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_dashboard`"
 
     def _home_dashboard_table(self) -> str:
         return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_home_dashboard`"
@@ -515,9 +604,13 @@ class BigQueryWarehouseRepository:
         return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_player_detail`"
 
     def _compare_table(self) -> str:
-        return (
-            f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_compare`"
-        )
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.workbench_compare`"
+
+    def _similarity_feature_table(self) -> str:
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.player_similarity_features`"
+
+    def _archetype_table(self) -> str:
+        return f"`{self.settings.project_id}.{self.settings.gold_dataset}.player_archetypes`"
 
     def _dim_player_table(self) -> str:
         return f"`{self.settings.project_id}.{self.settings.gold_dataset}.dim_player`"
@@ -527,7 +620,9 @@ class BigQueryWarehouseRepository:
 
     def _decorate_dashboard_row(self, row: dict[str, Any]) -> dict[str, Any]:
         item = dict(row)
-        item["category_strengths"] = _sanitize_category_list(row.get("category_strengths"))
+        item["category_strengths"] = _sanitize_category_list(
+            row.get("category_strengths")
+        )
         item["category_risks"] = _sanitize_category_list(row.get("category_risks"))
         item["reason_summary"] = build_reason_summary(row)
         item["opportunity_state"] = _opportunity_state_from_row(row)
@@ -605,13 +700,19 @@ class BigQueryWarehouseRepository:
                 str(row["as_of_date"])
                 for row in self._query(
                     sql,
-                    [bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON)],
+                    [
+                        bigquery.ScalarQueryParameter(
+                            "season", "STRING", SUPPORTED_SEASON
+                        )
+                    ],
                 )
             ]
         except BQAPIError:
             return []
 
-    def _resolve_home_as_of_date(self, requested: str | None) -> tuple[str | None, list[str]]:
+    def _resolve_home_as_of_date(
+        self, requested: str | None
+    ) -> tuple[str | None, list[str]]:
         options = self._fetch_home_date_options()
         if not options:
             return None, []
@@ -708,12 +809,252 @@ class BigQueryWarehouseRepository:
         )
         return rows[0] if rows else None
 
+    def _similarity_distance_sql(self, anchor_alias: str, candidate_alias: str) -> str:
+        terms = [
+            (
+                f"POW(COALESCE({candidate_alias}.norm_{feature_name}, 0) "
+                f"- COALESCE({anchor_alias}.norm_{feature_name}, 0), 2)"
+            )
+            for feature_name in SIMILARITY_FEATURE_COLUMNS
+        ]
+        return " + ".join(terms)
+
+    def _fetch_similarity_anchor(self, player_id: int) -> dict[str, Any] | None:
+        normalized_fields = ",\n          ".join(
+            [f"norm_{feature_name}" for feature_name in SIMILARITY_FEATURE_COLUMNS]
+        )
+        sql = f"""
+        SELECT
+          season,
+          as_of_date,
+          player_id,
+          player_name,
+          team_abbr,
+          position,
+          games_sampled,
+          sample_status,
+          archetype_id,
+          archetype_label,
+          cluster_confidence,
+          top_traits,
+          contrasting_traits,
+          archetype_summary,
+          {normalized_fields}
+        FROM {self._similarity_feature_table()}
+        WHERE season = @season
+          AND player_id = @player_id
+        LIMIT 1
+        """
+        rows = self._query(
+            sql,
+            [
+                bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+                bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+            ],
+        )
+        return rows[0] if rows else None
+
+    def _get_similar_players(
+        self,
+        player_id: int,
+        *,
+        anchor: dict[str, Any] | None = None,
+        limit: int = SIMILARITY_RESULT_LIMIT,
+    ) -> tuple[str, str | None, list[dict[str, Any]]]:
+        if anchor is None:
+            anchor = self._fetch_similarity_anchor(player_id)
+        if anchor is None:
+            return STATE_UNAVAILABLE, "Similarity profile is unavailable.", []
+
+        anchor_state = _similarity_state_from_sample_status(anchor.get("sample_status"))
+        if anchor_state == STATE_INSUFFICIENT_SAMPLE:
+            return (
+                anchor_state,
+                "Not enough games are available to generate similar players yet.",
+                [],
+            )
+
+        normalized_fields = ",\n          ".join(
+            [
+                f"candidate.norm_{feature_name}"
+                for feature_name in SIMILARITY_FEATURE_COLUMNS
+            ]
+        )
+        distance_sql = self._similarity_distance_sql("anchor", "candidate")
+        sql = f"""
+        WITH anchor AS (
+          SELECT *
+          FROM {self._similarity_feature_table()}
+          WHERE season = @season
+            AND player_id = @player_id
+          LIMIT 1
+        ),
+        scored AS (
+          SELECT
+            candidate.player_id,
+            candidate.player_name,
+            candidate.team_abbr,
+            candidate.archetype_label,
+            candidate.cluster_confidence,
+            candidate.top_traits,
+            candidate.contrasting_traits,
+            candidate.sample_status,
+            {normalized_fields},
+            SQRT({distance_sql}) AS euclidean_distance
+          FROM {self._similarity_feature_table()} candidate
+          CROSS JOIN anchor
+          WHERE candidate.season = @season
+            AND candidate.player_id != anchor.player_id
+            AND candidate.sample_status IN ('ready', 'limited_sample')
+        )
+        SELECT
+          *,
+          ROUND(1 / (1 + euclidean_distance), 4) AS similarity_score
+        FROM scored
+        ORDER BY euclidean_distance ASC, player_name
+        LIMIT @limit
+        """
+        rows = self._query(
+            sql,
+            [
+                bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+                bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+                bigquery.ScalarQueryParameter("limit", "INT64", limit),
+            ],
+        )
+
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            shared_traits = _shared_similarity_traits(anchor, row)
+            if not shared_traits:
+                shared_traits = [
+                    trait
+                    for trait in _split_display_list(anchor.get("top_traits"))
+                    if trait in _split_display_list(row.get("top_traits"))
+                ][:3]
+            items.append(
+                {
+                    "player_id": _to_int(row.get("player_id")),
+                    "player_name": row.get("player_name"),
+                    "team_abbr": row.get("team_abbr"),
+                    "headshot_url": build_headshot_url(row.get("player_id")),
+                    "player_initials": build_player_initials(row.get("player_name")),
+                    "similarity_score": _to_float(row.get("similarity_score")),
+                    "archetype_label": row.get("archetype_label"),
+                    "shared_traits": shared_traits,
+                    "contrasting_traits": _contrasting_similarity_traits(anchor, row),
+                }
+            )
+
+        if not items:
+            return STATE_UNAVAILABLE, "No similar-player matches are available.", []
+        return STATE_FRESH, None, items
+
+    def _get_pair_similarity(
+        self, player_a_id: int, player_b_id: int
+    ) -> dict[str, Any]:
+        player_a = self._fetch_similarity_anchor(player_a_id)
+        player_b = self._fetch_similarity_anchor(player_b_id)
+        if player_a is None or player_b is None:
+            return {
+                "state": STATE_UNAVAILABLE,
+                "score": None,
+                "summary": "Similarity profile is unavailable for at least one player.",
+                "same_archetype": False,
+                "archetype_labels": [],
+                "shared_traits": [],
+                "contrasting_traits": [],
+            }
+
+        state_a = _similarity_state_from_sample_status(player_a.get("sample_status"))
+        state_b = _similarity_state_from_sample_status(player_b.get("sample_status"))
+        if STATE_INSUFFICIENT_SAMPLE in (state_a, state_b):
+            return {
+                "state": STATE_INSUFFICIENT_SAMPLE,
+                "score": None,
+                "summary": "One player does not have enough games for a stable similarity read yet.",
+                "same_archetype": False,
+                "archetype_labels": [],
+                "shared_traits": [],
+                "contrasting_traits": [],
+            }
+
+        squared_distance = 0.0
+        for feature_name in SIMILARITY_FEATURE_COLUMNS:
+            player_a_value = _similarity_feature_value(player_a, feature_name) or 0.0
+            player_b_value = _similarity_feature_value(player_b, feature_name) or 0.0
+            squared_distance += (player_b_value - player_a_value) ** 2
+        score = round(1 / (1 + sqrt(squared_distance)), 4)
+        if score is None:
+            return {
+                "state": STATE_UNAVAILABLE,
+                "score": None,
+                "summary": "Similarity profile is unavailable for at least one player.",
+                "same_archetype": False,
+                "archetype_labels": [],
+                "shared_traits": [],
+                "contrasting_traits": [],
+            }
+        same_archetype = player_a.get("archetype_label") is not None and player_a.get(
+            "archetype_label"
+        ) == player_b.get("archetype_label")
+        if same_archetype:
+            summary = (
+                f"Shared archetype: {player_a.get('archetype_label')}. "
+                f"Current stat-profile similarity is {score}."
+            )
+        else:
+            summary = (
+                f"Archetypes diverge: {player_a.get('archetype_label')} vs "
+                f"{player_b.get('archetype_label')}. Current stat-profile similarity is {score}."
+            )
+        return {
+            "state": STATE_FRESH,
+            "score": score,
+            "summary": summary,
+            "same_archetype": same_archetype,
+            "archetype_labels": [
+                player_a.get("archetype_label"),
+                player_b.get("archetype_label"),
+            ],
+            "shared_traits": _shared_similarity_traits(player_a, player_b),
+            "contrasting_traits": _contrasting_similarity_traits(player_a, player_b),
+        }
+
     def _build_player_detail_payload(
         self,
         *,
         identity: dict[str, Any],
         row: dict[str, Any] | None,
+        archetype_row: dict[str, Any] | None,
+        similarity_state: str,
+        similarity_reason: str | None,
+        similar_players: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        archetype_state = STATE_UNAVAILABLE
+        archetype_payload = {
+            "state": STATE_UNAVAILABLE,
+            "archetype_id": None,
+            "archetype_label": None,
+            "cluster_confidence": None,
+            "top_traits": [],
+            "summary": None,
+        }
+        if archetype_row is not None:
+            archetype_state = _similarity_state_from_sample_status(
+                archetype_row.get("sample_status")
+            )
+            archetype_payload = {
+                "state": archetype_state,
+                "archetype_id": archetype_row.get("archetype_id"),
+                "archetype_label": archetype_row.get("archetype_label"),
+                "cluster_confidence": _to_float(
+                    archetype_row.get("cluster_confidence")
+                ),
+                "top_traits": _split_display_list(archetype_row.get("top_traits")),
+                "summary": archetype_row.get("archetype_summary"),
+            }
+
         if row is None:
             return {
                 "player": {
@@ -721,14 +1062,16 @@ class BigQueryWarehouseRepository:
                     "player_id": identity.get("player_id"),
                     "player_name": identity.get("player_name"),
                     "headshot_url": build_headshot_url(identity.get("player_id")),
-                    "player_initials": build_player_initials(identity.get("player_name")),
+                    "player_initials": build_player_initials(
+                        identity.get("player_name")
+                    ),
                     "team_abbr": None,
                     "latest_game_date": None,
                     "overall_rank": None,
                     "recommendation_score": None,
                     "recommendation_tier": None,
-                "category_strengths": None,
-                "category_risks": None,
+                    "category_strengths": None,
+                    "category_risks": None,
                     "is_ranked": False,
                 },
                 "availability_state": STATE_UNAVAILABLE,
@@ -743,10 +1086,15 @@ class BigQueryWarehouseRepository:
                     "recent_form": STATE_UNAVAILABLE,
                     "category_profile": STATE_UNAVAILABLE,
                     "opportunity": STATE_UNAVAILABLE,
+                    "archetype": archetype_state,
+                    "similarity": similarity_state,
                 },
                 "recent_form": _default_recent_form(),
                 "category_profile": [],
                 "opportunity": None,
+                "archetype": archetype_payload,
+                "similarity_reason": similarity_reason,
+                "similar_players": similar_players,
             }
 
         recent_form = []
@@ -786,9 +1134,7 @@ class BigQueryWarehouseRepository:
             if any(item["state"] == STATE_INSUFFICIENT_SAMPLE for item in recent_form)
             else STATE_UNAVAILABLE
         )
-        category_profile_state = (
-            STATE_FRESH if category_profile else STATE_UNAVAILABLE
-        )
+        category_profile_state = STATE_FRESH if category_profile else STATE_UNAVAILABLE
         opportunity = None
         if opportunity_state != STATE_UNAVAILABLE:
             opportunity = {
@@ -818,7 +1164,9 @@ class BigQueryWarehouseRepository:
                 "is_ranked": row.get("overall_rank") is not None,
             },
             "availability_state": (
-                STATE_FRESH if row.get("overall_rank") is not None else STATE_UNAVAILABLE
+                STATE_FRESH
+                if row.get("overall_rank") is not None
+                else STATE_UNAVAILABLE
             ),
             "availability_reason": (
                 None if row.get("overall_rank") is not None else "Not currently ranked"
@@ -833,10 +1181,15 @@ class BigQueryWarehouseRepository:
                 "recent_form": recent_form_state,
                 "category_profile": category_profile_state,
                 "opportunity": opportunity_state,
+                "archetype": archetype_state,
+                "similarity": similarity_state,
             },
             "recent_form": recent_form,
             "category_profile": category_profile,
             "opportunity": opportunity,
+            "archetype": archetype_payload,
+            "similarity_reason": similarity_reason,
+            "similar_players": similar_players,
         }
 
     def get_dashboard(self, as_of_date: str | None = None) -> dict[str, Any]:
@@ -1066,7 +1419,23 @@ class BigQueryWarehouseRepository:
             ],
         )
         row = rows[0] if rows else None
-        return self._build_player_detail_payload(identity=identity, row=row)
+        anchor = self._fetch_similarity_anchor(player_id)
+        (
+            similarity_state,
+            similarity_reason,
+            similar_players,
+        ) = self._get_similar_players(
+            player_id,
+            anchor=anchor,
+        )
+        return self._build_player_detail_payload(
+            identity=identity,
+            row=row,
+            archetype_row=anchor,
+            similarity_state=similarity_state,
+            similarity_reason=similarity_reason,
+            similar_players=similar_players,
+        )
 
     def get_compare(
         self,
@@ -1112,6 +1481,7 @@ class BigQueryWarehouseRepository:
             ],
         )
         rows_by_player = {int(row["player_id"]): row for row in rows}
+        pair_similarity = self._get_pair_similarity(player_a_id, player_b_id)
 
         def build_side(player_id: int) -> dict[str, Any]:
             row = rows_by_player.get(player_id)
@@ -1192,6 +1562,7 @@ class BigQueryWarehouseRepository:
             "focus": focus,
             "focus_label": str(COMPARE_FOCUS_CONFIG[focus]["label"]),
             "focus_description": str(COMPARE_FOCUS_CONFIG[focus]["description"]),
+            "similarity": pair_similarity,
             "comparison": {
                 "player_a": build_side(player_a_id),
                 "player_b": build_side(player_b_id),

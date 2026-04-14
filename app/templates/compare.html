@@ -116,6 +116,20 @@
             <h2>Comparison Surface</h2>
           </div>
           <p class="meta">Stat focus: {{ comparison.focus_label }}. {{ comparison.focus_description }}</p>
+          <div class="notice">
+            <strong>Stat-profile similarity.</strong>
+            <p>{{ comparison.similarity.summary }}</p>
+            {% if comparison.similarity.shared_traits %}
+              <div class="chip-row">
+                {% for trait in comparison.similarity.shared_traits %}
+                  <span class="chip">Shared {{ trait }}</span>
+                {% endfor %}
+                {% for trait in comparison.similarity.contrasting_traits %}
+                  <span class="chip">Diff {{ trait }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
           <div class="chip-row">
             {% for option in compare_window_options %}
               <a class="button-link secondary" href="/compare?player_a_id={{ comparison.comparison.player_a.player_id }}&player_b_id={{ comparison.comparison.player_b.player_id }}&window={{ option.key }}&focus={{ comparison.focus }}">{{ option.label }}</a>

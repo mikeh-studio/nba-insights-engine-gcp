@@ -285,6 +285,8 @@ def test_ensure_table_has_columns_adds_expected_columns():
         "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS player_id INT64",
         "ALTER TABLE `project.dataset.raw_game_logs` ADD COLUMN IF NOT EXISTS roster_status BOOL",
     ]
+
+
 def test_get_all_game_line_scores_dedupes_by_game_and_team(monkeypatch):
     def fake_get_game_line_scores(game_id: str, *, season: str = "2025-26"):
         return pd.DataFrame(
@@ -345,7 +347,9 @@ def test_get_all_game_line_scores_dedupes_by_game_and_team(monkeypatch):
         )
 
     monkeypatch.setattr(pipeline, "get_game_line_scores", fake_get_game_line_scores)
-    result = pipeline.get_all_game_line_scores(["001", "001"], season="2025-26", delay=0)
+    result = pipeline.get_all_game_line_scores(
+        ["001", "001"], season="2025-26", delay=0
+    )
 
     assert len(result) == 1
     assert result.iloc[0]["GAME_ID"] == "001"
@@ -388,7 +392,10 @@ def test_get_all_player_references_dedupes_by_player_id(monkeypatch):
         )
 
     monkeypatch.setattr(pipeline, "get_player_reference", fake_get_player_reference)
-    players = [{"id": 7, "full_name": "Test Player"}, {"id": 7, "full_name": "Test Player"}]
+    players = [
+        {"id": 7, "full_name": "Test Player"},
+        {"id": 7, "full_name": "Test Player"},
+    ]
     result = pipeline.get_all_player_references(players, delay=0)
 
     assert len(result) == 1
@@ -616,3 +623,282 @@ def test_build_analysis_snapshot_record_includes_scoring_contribution_and_contex
     assert record["context_roster_status"] is True
     assert "Tyrese Maxey supplied 31 of 112 PHI points" in record["body"]
     assert "Tyrese Maxey is listed as a G for 76ers (PHI)" in record["body"]
+
+
+def test_build_player_similarity_outputs_returns_normalized_feature_tables():
+    feature_rows = pd.DataFrame(
+        [
+            {
+                "season": "2025-26",
+                "as_of_date": "2026-02-11",
+                "player_id": player_id,
+                "player_name": player_name,
+                "team_abbr": team_abbr,
+                "position": position,
+                "games_sampled": 24,
+                "sample_status": "ready",
+                "season_avg_pts": season_avg_pts,
+                "season_avg_reb": season_avg_reb,
+                "season_avg_ast": season_avg_ast,
+                "season_avg_stl": season_avg_stl,
+                "season_avg_blk": season_avg_blk,
+                "season_avg_fg3m": season_avg_fg3m,
+                "season_avg_tov": season_avg_tov,
+                "season_avg_min": season_avg_min,
+                "recent_pts": recent_pts,
+                "recent_reb": recent_reb,
+                "recent_ast": recent_ast,
+                "recent_stl": recent_stl,
+                "recent_blk": recent_blk,
+                "recent_fg3m": recent_fg3m,
+                "recent_tov": recent_tov,
+                "recent_min": recent_min,
+                "recent_points_share_of_team": recent_points_share_of_team,
+                "recent_points_share_of_game": recent_points_share_of_game,
+                "minutes_delta_vs_season": minutes_delta_vs_season,
+            }
+            for (
+                player_id,
+                player_name,
+                team_abbr,
+                position,
+                season_avg_pts,
+                season_avg_reb,
+                season_avg_ast,
+                season_avg_stl,
+                season_avg_blk,
+                season_avg_fg3m,
+                season_avg_tov,
+                season_avg_min,
+                recent_pts,
+                recent_reb,
+                recent_ast,
+                recent_stl,
+                recent_blk,
+                recent_fg3m,
+                recent_tov,
+                recent_min,
+                recent_points_share_of_team,
+                recent_points_share_of_game,
+                minutes_delta_vs_season,
+            ) in [
+                (
+                    1,
+                    "Tyrese Maxey",
+                    "PHI",
+                    "G",
+                    25.0,
+                    4.2,
+                    7.1,
+                    1.2,
+                    0.3,
+                    3.2,
+                    2.4,
+                    35.8,
+                    28.4,
+                    4.8,
+                    7.6,
+                    1.4,
+                    0.2,
+                    3.5,
+                    2.2,
+                    36.4,
+                    0.28,
+                    0.14,
+                    1.6,
+                ),
+                (
+                    2,
+                    "Jalen Brunson",
+                    "NYK",
+                    "G",
+                    26.2,
+                    3.6,
+                    6.9,
+                    1.0,
+                    0.2,
+                    2.7,
+                    2.6,
+                    35.2,
+                    27.8,
+                    3.9,
+                    7.3,
+                    1.1,
+                    0.2,
+                    2.9,
+                    2.4,
+                    35.8,
+                    0.29,
+                    0.15,
+                    1.1,
+                ),
+                (
+                    3,
+                    "Mikal Bridges",
+                    "NYK",
+                    "F",
+                    19.3,
+                    4.7,
+                    3.6,
+                    1.1,
+                    0.7,
+                    2.4,
+                    1.6,
+                    35.4,
+                    20.2,
+                    4.9,
+                    3.3,
+                    1.3,
+                    0.8,
+                    2.6,
+                    1.5,
+                    35.6,
+                    0.21,
+                    0.10,
+                    0.5,
+                ),
+                (
+                    4,
+                    "Jaren Jackson Jr.",
+                    "MEM",
+                    "F-C",
+                    22.1,
+                    6.4,
+                    2.1,
+                    1.0,
+                    1.9,
+                    1.8,
+                    1.9,
+                    32.5,
+                    23.4,
+                    6.8,
+                    2.4,
+                    1.1,
+                    2.1,
+                    2.0,
+                    1.8,
+                    33.1,
+                    0.25,
+                    0.12,
+                    0.8,
+                ),
+                (
+                    5,
+                    "Brook Lopez",
+                    "MIL",
+                    "C",
+                    14.8,
+                    6.1,
+                    1.4,
+                    0.6,
+                    2.3,
+                    2.1,
+                    1.4,
+                    29.5,
+                    15.4,
+                    6.3,
+                    1.6,
+                    0.7,
+                    2.5,
+                    2.2,
+                    1.5,
+                    30.2,
+                    0.19,
+                    0.09,
+                    0.6,
+                ),
+                (
+                    6,
+                    "Josh Hart",
+                    "NYK",
+                    "F",
+                    14.2,
+                    9.1,
+                    5.4,
+                    1.4,
+                    0.5,
+                    1.3,
+                    1.8,
+                    37.4,
+                    15.3,
+                    10.1,
+                    5.9,
+                    1.5,
+                    0.6,
+                    1.6,
+                    1.6,
+                    38.1,
+                    0.18,
+                    0.08,
+                    1.4,
+                ),
+            ]
+        ]
+    )
+
+    outputs = pipeline.build_player_similarity_outputs(feature_rows, cluster_count=4)
+
+    assert set(outputs) == {"features", "archetypes"}
+    assert len(outputs["features"]) == 6
+    assert len(outputs["archetypes"]) == 6
+    assert not outputs["features"].duplicated(subset=["season", "player_id"]).any()
+    assert set(outputs["archetypes"]["archetype_label"]).issubset(
+        pipeline.ALLOWED_ARCHETYPE_LABELS
+    )
+    for feature_name in pipeline.SIMILARITY_FEATURE_COLUMNS:
+        assert f"norm_{feature_name}" in outputs["features"].columns
+    assert outputs["archetypes"]["top_traits"].str.len().gt(0).all()
+
+
+def test_build_player_similarity_outputs_excludes_insufficient_sample_rows():
+    feature_rows = pd.DataFrame(
+        [
+            {
+                "season": "2025-26",
+                "as_of_date": "2026-02-11",
+                "player_id": 1,
+                "player_name": "Ready Player",
+                "team_abbr": "PHI",
+                "position": "G",
+                "games_sampled": 20,
+                "sample_status": "ready",
+                **{
+                    feature_name: 1.0
+                    for feature_name in pipeline.SIMILARITY_FEATURE_COLUMNS
+                },
+            },
+            {
+                "season": "2025-26",
+                "as_of_date": "2026-02-11",
+                "player_id": 2,
+                "player_name": "Limited Player",
+                "team_abbr": "NYK",
+                "position": "F",
+                "games_sampled": 6,
+                "sample_status": "limited_sample",
+                **{
+                    feature_name: 2.0
+                    for feature_name in pipeline.SIMILARITY_FEATURE_COLUMNS
+                },
+            },
+            {
+                "season": "2025-26",
+                "as_of_date": "2026-02-11",
+                "player_id": 3,
+                "player_name": "Insufficient Player",
+                "team_abbr": "BOS",
+                "position": "C",
+                "games_sampled": 2,
+                "sample_status": "insufficient_sample",
+                **{
+                    feature_name: 3.0
+                    for feature_name in pipeline.SIMILARITY_FEATURE_COLUMNS
+                },
+            },
+        ]
+    )
+
+    outputs = pipeline.build_player_similarity_outputs(feature_rows, cluster_count=3)
+
+    assert outputs["features"]["player_id"].tolist() == [1, 2]
+    assert outputs["archetypes"]["player_id"].tolist() == [1, 2]

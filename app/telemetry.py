@@ -82,10 +82,10 @@ def instrument_dashboard_view(
         )
 
 
-def _detail_panel_reason(
-    panel: str, state: str, player_detail: dict[str, Any]
-) -> str:
+def _detail_panel_reason(panel: str, state: str, player_detail: dict[str, Any]) -> str:
     if state == STATE_INSUFFICIENT_SAMPLE:
+        if panel in {"archetype", "similarity"}:
+            return "insufficient_similarity_sample"
         return "insufficient_window_sample"
     if player_detail.get("availability_state") == STATE_UNAVAILABLE:
         return "player_not_ranked"
@@ -93,6 +93,10 @@ def _detail_panel_reason(
         return "missing_schedule_context"
     if panel == "category_profile":
         return "missing_category_profile"
+    if panel == "archetype":
+        return "missing_similarity_profile"
+    if panel == "similarity":
+        return "missing_similarity_matches"
     return "window_unavailable"
 
 
@@ -127,7 +131,10 @@ def instrument_player_view(
 def _compare_side_reason(side: dict[str, Any]) -> str:
     if side.get("state") == STATE_INSUFFICIENT_SAMPLE:
         return "insufficient_window_sample"
-    if side.get("state_reason") == "Player not found" or side.get("player_name") is None:
+    if (
+        side.get("state_reason") == "Player not found"
+        or side.get("player_name") is None
+    ):
         return "player_not_found"
     if side.get("availability_state") == STATE_UNAVAILABLE:
         return "player_not_ranked"

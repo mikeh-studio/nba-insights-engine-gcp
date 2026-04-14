@@ -461,7 +461,9 @@ def get_game_line_scores(
         "PTS",
     ]
 
-    empty = pd.DataFrame(columns=[field.name for field in get_game_line_scores_schema()])
+    empty = pd.DataFrame(
+        columns=[field.name for field in get_game_line_scores_schema()]
+    )
 
     for attempt in range(1, retries + 1):
         try:
@@ -489,12 +491,16 @@ def get_game_line_scores(
             numeric_cols.extend([f"PTS_OT{idx}" for idx in range(1, 11)])
             numeric_cols.append("PTS")
             for col in numeric_cols:
-                out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
+                out[col] = (
+                    pd.to_numeric(out[col], errors="coerce").fillna(0).astype(int)
+                )
             out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
             return out[[field.name for field in get_game_line_scores_schema()]]
         except Exception:
             if attempt == retries:
-                logger.exception("Failed game_id=%s after %s attempts", game_id, retries)
+                logger.exception(
+                    "Failed game_id=%s after %s attempts", game_id, retries
+                )
                 return empty.copy()
             sleep_seconds = delay * attempt
             logger.warning(
@@ -536,7 +542,9 @@ def get_all_game_line_scores(
         time.sleep(delay)
 
     if not all_scores:
-        return pd.DataFrame(columns=[field.name for field in get_game_line_scores_schema()])
+        return pd.DataFrame(
+            columns=[field.name for field in get_game_line_scores_schema()]
+        )
 
     combined = pd.concat(all_scores, ignore_index=True)
     combined = combined.drop_duplicates(subset=["GAME_ID", "TEAM_ID"]).copy()
@@ -580,7 +588,9 @@ def get_player_reference(
         "DRAFT_ROUND",
         "DRAFT_NUMBER",
     ]
-    empty = pd.DataFrame(columns=[field.name for field in get_player_reference_schema()])
+    empty = pd.DataFrame(
+        columns=[field.name for field in get_player_reference_schema()]
+    )
 
     for attempt in range(1, retries + 1):
         try:
@@ -618,9 +628,12 @@ def get_player_reference(
                 out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
             out["PLAYER_ID"] = out["PLAYER_ID"].fillna(player_id).astype("Int64")
             out["TEAM_ABBR"] = out["TEAM_ABBR"].astype("string").str.upper()
-            out["ROSTER_STATUS"] = pd.to_numeric(
-                out["ROSTER_STATUS"], errors="coerce"
-            ).fillna(0).astype(int).astype(bool)
+            out["ROSTER_STATUS"] = (
+                pd.to_numeric(out["ROSTER_STATUS"], errors="coerce")
+                .fillna(0)
+                .astype(int)
+                .astype(bool)
+            )
             out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
             return out[[field.name for field in get_player_reference_schema()]]
         except Exception:
@@ -665,7 +678,9 @@ def get_all_player_references(
         time.sleep(delay)
 
     if not all_profiles:
-        return pd.DataFrame(columns=[field.name for field in get_player_reference_schema()])
+        return pd.DataFrame(
+            columns=[field.name for field in get_player_reference_schema()]
+        )
 
     combined = pd.concat(all_profiles, ignore_index=True)
     combined = combined.drop_duplicates(subset=["PLAYER_ID"]).copy()
@@ -788,14 +803,24 @@ def get_player_reference_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
     ]
 
+
 _BQ_TYPE_MAP = {
     "INTEGER": "INT64",
     "FLOAT": "FLOAT64",
     "BOOLEAN": "BOOL",
 }
 _ALLOWED_DDL_TYPES = {
-    "INT64", "FLOAT64", "BOOL", "STRING", "DATE", "TIMESTAMP",
-    "DATETIME", "NUMERIC", "BIGNUMERIC", "BYTES", "JSON",
+    "INT64",
+    "FLOAT64",
+    "BOOL",
+    "STRING",
+    "DATE",
+    "TIMESTAMP",
+    "DATETIME",
+    "NUMERIC",
+    "BIGNUMERIC",
+    "BYTES",
+    "JSON",
 }
 
 
@@ -840,6 +865,8 @@ def ensure_table_has_columns(
         raise RuntimeError(
             f"ensure_table_has_columns: {len(errors)} column(s) failed for {table_id}: {names}"
         )
+
+
 def load_gcs_to_bigquery(
     bq_client: bigquery.Client,
     gcs_uri: str,
@@ -1052,12 +1079,7 @@ def run_player_reference_quality_checks(
       (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
       (SELECT COUNT(*) FROM base WHERE player_name IS NULL OR trim(player_name) = '') AS missing_name_rows
     """
-    dq = (
-        bq_client.query(dq_query)
-        .to_dataframe()
-        .iloc[0]
-        .to_dict()
-    )
+    dq = bq_client.query(dq_query).to_dataframe().iloc[0].to_dict()
     if dq["total_rows"] == 0:
         raise ValueError("DQ failed: player reference staging table has zero rows")
     if dq["null_key_rows"] > 0:
@@ -1086,7 +1108,9 @@ def validate_merge_reconciliation(
 ) -> Dict[str, int]:
     """Validate that merge accounting is internally consistent."""
     if rows_loaded < 0:
-        raise ValueError(f"Reconciliation failed for {domain}: rows_loaded cannot be negative")
+        raise ValueError(
+            f"Reconciliation failed for {domain}: rows_loaded cannot be negative"
+        )
     if any(value < 0 for value in (pre_count, post_count, inserted, updated)):
         raise ValueError(
             f"Reconciliation failed for {domain}: merge counts cannot be negative"
@@ -2075,7 +2099,12 @@ def build_analysis_snapshot_record(
         ).copy()
         if not contribution_working.empty:
             contribution_working = contribution_working.sort_values(
-                ["game_date", "player_points_share_of_team", "player_pts", "player_name"],
+                [
+                    "game_date",
+                    "player_points_share_of_team",
+                    "player_pts",
+                    "player_name",
+                ],
                 ascending=[False, False, False, True],
             )
             featured_contribution = contribution_working.iloc[0]
@@ -2178,7 +2207,9 @@ def build_analysis_snapshot_record(
                 "draft_number": str(featured_context.get("draft_number") or ""),
             }
             roster_label = (
-                "active" if context_payload["roster_status"] else "inactive"
+                "active"
+                if context_payload["roster_status"]
+                else "inactive"
                 if context_payload["roster_status"] is not None
                 else "unknown roster status"
             )
@@ -2549,3 +2580,405 @@ def upsert_analysis_snapshot(
         ]
     )
     bq_client.query(merge_sql, job_config=job_config).result()
+
+
+SIMILARITY_FEATURE_COLUMNS = [
+    "season_avg_pts",
+    "season_avg_reb",
+    "season_avg_ast",
+    "season_avg_stl",
+    "season_avg_blk",
+    "season_avg_fg3m",
+    "season_avg_tov",
+    "season_avg_min",
+    "recent_pts",
+    "recent_reb",
+    "recent_ast",
+    "recent_stl",
+    "recent_blk",
+    "recent_fg3m",
+    "recent_tov",
+    "recent_min",
+    "recent_points_share_of_team",
+    "recent_points_share_of_game",
+    "minutes_delta_vs_season",
+]
+
+SIMILARITY_TRAIT_LABELS = {
+    "season_avg_pts": "scoring volume",
+    "season_avg_reb": "rebounding",
+    "season_avg_ast": "playmaking",
+    "season_avg_stl": "steals pressure",
+    "season_avg_blk": "rim protection",
+    "season_avg_fg3m": "three-point volume",
+    "season_avg_min": "minutes load",
+    "recent_points_share_of_team": "usage share",
+    "recent_points_share_of_game": "game scoring share",
+    "minutes_delta_vs_season": "minutes trend",
+}
+
+ALLOWED_ARCHETYPE_LABELS = {
+    "Primary Creator",
+    "Scoring Guard",
+    "Two-Way Wing",
+    "Connector Wing",
+    "Stretch Big",
+    "Interior Big",
+}
+
+
+def _coerce_similarity_feature_frame(feature_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dtypes for player similarity feature engineering."""
+    if feature_df.empty:
+        return feature_df.copy()
+
+    working = feature_df.copy()
+    working["player_id"] = pd.to_numeric(working["player_id"], errors="coerce")
+    working = working.dropna(subset=["player_id"]).copy()
+    working["player_id"] = working["player_id"].astype(int)
+    working["games_sampled"] = (
+        pd.to_numeric(working.get("games_sampled"), errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    working["season"] = working["season"].astype("string")
+    working["player_name"] = working["player_name"].fillna("").astype("string")
+    working["team_abbr"] = working["team_abbr"].fillna("").astype("string")
+    if "position" not in working:
+        working["position"] = ""
+    if "sample_status" not in working:
+        working["sample_status"] = "insufficient_sample"
+    working["position"] = working["position"].fillna("").astype("string")
+    working["sample_status"] = (
+        working["sample_status"].fillna("insufficient_sample").astype("string")
+    )
+    working["as_of_date"] = pd.to_datetime(
+        working["as_of_date"], errors="coerce"
+    ).dt.date
+
+    for column in SIMILARITY_FEATURE_COLUMNS:
+        working[column] = pd.to_numeric(working.get(column), errors="coerce")
+
+    return working
+
+
+def _rank_similarity_traits(
+    values: Dict[str, float],
+    *,
+    limit: int = 3,
+    positive_only: bool = False,
+    negative_only: bool = False,
+) -> List[str]:
+    ranked: List[Tuple[str, float]] = []
+    for feature_name, trait_label in SIMILARITY_TRAIT_LABELS.items():
+        raw_value = values.get(feature_name)
+        if raw_value in (None, ""):
+            continue
+        score = float(raw_value)
+        if positive_only and score <= 0:
+            continue
+        if negative_only and score >= 0:
+            continue
+        ranked.append((trait_label, score))
+
+    if negative_only:
+        ranked.sort(key=lambda item: item[1])
+    elif positive_only:
+        ranked.sort(key=lambda item: item[1], reverse=True)
+    else:
+        ranked.sort(key=lambda item: abs(item[1]), reverse=True)
+
+    return [label for label, _ in ranked[:limit]]
+
+
+def _label_cluster(center_values: Dict[str, float]) -> str:
+    """Map a cluster center to a stable human-readable archetype label."""
+    assists = float(center_values.get("season_avg_ast", 0.0))
+    points = float(center_values.get("season_avg_pts", 0.0))
+    rebounds = float(center_values.get("season_avg_reb", 0.0))
+    steals = float(center_values.get("season_avg_stl", 0.0))
+    blocks = float(center_values.get("season_avg_blk", 0.0))
+    threes = float(center_values.get("season_avg_fg3m", 0.0))
+    usage = float(center_values.get("recent_points_share_of_team", 0.0))
+
+    if rebounds >= 0.7 and blocks >= 0.5 and threes >= 0.15:
+        return "Stretch Big"
+    if rebounds >= 0.85 and blocks >= 0.45:
+        return "Interior Big"
+    if assists >= 0.9 and usage >= 0.35:
+        return "Primary Creator"
+    if points >= 0.7 and threes >= 0.45 and assists < 0.9:
+        return "Scoring Guard"
+    if steals >= 0.2 and threes >= 0.1 and rebounds >= -0.1:
+        return "Two-Way Wing"
+    return "Connector Wing"
+
+
+def _build_cluster_summary(archetype_label: str, top_traits: List[str]) -> str:
+    if not top_traits:
+        return archetype_label
+    return f"{archetype_label} driven by {', '.join(top_traits)}."
+
+
+def _validate_similarity_output_frames(
+    features_df: pd.DataFrame, archetypes_df: pd.DataFrame
+) -> None:
+    """Enforce minimum output contracts for similarity tables."""
+    if features_df.empty or archetypes_df.empty:
+        raise ValueError("Similarity outputs must not be empty")
+
+    feature_dupes = features_df.duplicated(subset=["season", "player_id"]).any()
+    archetype_dupes = archetypes_df.duplicated(subset=["season", "player_id"]).any()
+    if feature_dupes:
+        raise ValueError(
+            "Duplicate season/player rows found in player_similarity_features"
+        )
+    if archetype_dupes:
+        raise ValueError("Duplicate season/player rows found in player_archetypes")
+
+    if features_df["player_id"].isna().any() or archetypes_df["player_id"].isna().any():
+        raise ValueError("player_id must not be null in similarity outputs")
+
+    invalid_labels = (
+        set(archetypes_df["archetype_label"].dropna()) - ALLOWED_ARCHETYPE_LABELS
+    )
+    if invalid_labels:
+        raise ValueError(
+            f"Unexpected archetype labels detected: {sorted(invalid_labels)}"
+        )
+
+
+def build_player_similarity_outputs(
+    feature_df: pd.DataFrame,
+    *,
+    cluster_count: int = 6,
+) -> Dict[str, pd.DataFrame]:
+    """Cluster players into archetypes and publish normalized similarity vectors."""
+    import numpy as np
+    from sklearn.cluster import KMeans
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import StandardScaler
+
+    working = _coerce_similarity_feature_frame(feature_df)
+    if working.empty:
+        raise ValueError("Cannot build similarity outputs from an empty feature frame")
+
+    modeling = working[working["sample_status"] != "insufficient_sample"].copy()
+    if modeling.empty:
+        raise ValueError("No players meet the minimum sample threshold for similarity")
+
+    imputer = SimpleImputer(strategy="median")
+    imputed_values = imputer.fit_transform(modeling[SIMILARITY_FEATURE_COLUMNS])
+    scaler = StandardScaler()
+    scaled_values = scaler.fit_transform(imputed_values)
+
+    effective_clusters = max(1, min(int(cluster_count), len(modeling)))
+    kmeans = KMeans(n_clusters=effective_clusters, n_init=20, random_state=42)
+    cluster_ids = kmeans.fit_predict(scaled_values)
+    distances = np.linalg.norm(
+        scaled_values - kmeans.cluster_centers_[cluster_ids], axis=1
+    )
+
+    modeling = modeling.reset_index(drop=True)
+    modeling["cluster_index"] = cluster_ids
+
+    cluster_summaries: Dict[int, Dict[str, Any]] = {}
+    for cluster_index in sorted(modeling["cluster_index"].unique()):
+        center = {
+            feature_name: float(value)
+            for feature_name, value in zip(
+                SIMILARITY_FEATURE_COLUMNS,
+                kmeans.cluster_centers_[cluster_index],
+            )
+        }
+        top_traits = _rank_similarity_traits(center, limit=3, positive_only=True)
+        archetype_label = _label_cluster(center)
+        cluster_summaries[int(cluster_index)] = {
+            "archetype_id": f"cluster_{int(cluster_index)}",
+            "archetype_label": archetype_label,
+            "top_traits": ", ".join(top_traits),
+            "archetype_summary": _build_cluster_summary(archetype_label, top_traits),
+        }
+
+    confidence_by_row: List[float] = []
+    for row_index, cluster_index in enumerate(cluster_ids):
+        cluster_mask = cluster_ids == cluster_index
+        cluster_distances = distances[cluster_mask]
+        max_distance = float(cluster_distances.max()) if len(cluster_distances) else 0.0
+        if max_distance <= 1e-9:
+            confidence = 1.0
+        else:
+            confidence = 1.0 - float(distances[row_index]) / max_distance
+        confidence_by_row.append(round(max(0.0, min(confidence, 1.0)), 4))
+
+    normalized_columns = {
+        f"norm_{feature_name}": scaled_values[:, index]
+        for index, feature_name in enumerate(SIMILARITY_FEATURE_COLUMNS)
+    }
+    modeling = modeling.assign(**normalized_columns)
+    modeling["cluster_confidence"] = confidence_by_row
+
+    player_top_traits: List[str] = []
+    player_bottom_traits: List[str] = []
+    archetype_ids: List[str] = []
+    archetype_labels: List[str] = []
+    archetype_summaries: List[str] = []
+    for _, row in modeling.iterrows():
+        normalized_values = {
+            feature_name: float(row[f"norm_{feature_name}"])
+            for feature_name in SIMILARITY_FEATURE_COLUMNS
+        }
+        player_top_traits.append(
+            ", ".join(
+                _rank_similarity_traits(normalized_values, limit=3, positive_only=True)
+            )
+        )
+        player_bottom_traits.append(
+            ", ".join(
+                _rank_similarity_traits(normalized_values, limit=2, negative_only=True)
+            )
+        )
+        cluster_summary = cluster_summaries[int(row["cluster_index"])]
+        archetype_ids.append(cluster_summary["archetype_id"])
+        archetype_labels.append(cluster_summary["archetype_label"])
+        archetype_summaries.append(cluster_summary["archetype_summary"])
+
+    modeling["top_traits"] = player_top_traits
+    modeling["contrasting_traits"] = player_bottom_traits
+    modeling["archetype_id"] = archetype_ids
+    modeling["archetype_label"] = archetype_labels
+    modeling["archetype_summary"] = archetype_summaries
+
+    features_df = modeling[
+        [
+            "season",
+            "as_of_date",
+            "player_id",
+            "player_name",
+            "team_abbr",
+            "position",
+            "games_sampled",
+            "sample_status",
+            "archetype_id",
+            "archetype_label",
+            "cluster_confidence",
+            "top_traits",
+            "contrasting_traits",
+            "archetype_summary",
+            *SIMILARITY_FEATURE_COLUMNS,
+            *[f"norm_{feature_name}" for feature_name in SIMILARITY_FEATURE_COLUMNS],
+        ]
+    ].copy()
+
+    archetypes_df = modeling[
+        [
+            "season",
+            "as_of_date",
+            "player_id",
+            "player_name",
+            "team_abbr",
+            "position",
+            "games_sampled",
+            "sample_status",
+            "archetype_id",
+            "archetype_label",
+            "cluster_confidence",
+            "top_traits",
+            "archetype_summary",
+        ]
+    ].copy()
+
+    _validate_similarity_output_frames(features_df, archetypes_df)
+    return {"features": features_df, "archetypes": archetypes_df}
+
+
+def _player_similarity_feature_schema() -> List[bigquery.SchemaField]:
+    fields = [
+        bigquery.SchemaField("season", "STRING"),
+        bigquery.SchemaField("as_of_date", "DATE"),
+        bigquery.SchemaField("player_id", "INT64"),
+        bigquery.SchemaField("player_name", "STRING"),
+        bigquery.SchemaField("team_abbr", "STRING"),
+        bigquery.SchemaField("position", "STRING"),
+        bigquery.SchemaField("games_sampled", "INT64"),
+        bigquery.SchemaField("sample_status", "STRING"),
+        bigquery.SchemaField("archetype_id", "STRING"),
+        bigquery.SchemaField("archetype_label", "STRING"),
+        bigquery.SchemaField("cluster_confidence", "FLOAT64"),
+        bigquery.SchemaField("top_traits", "STRING"),
+        bigquery.SchemaField("contrasting_traits", "STRING"),
+        bigquery.SchemaField("archetype_summary", "STRING"),
+    ]
+    for feature_name in SIMILARITY_FEATURE_COLUMNS:
+        fields.append(bigquery.SchemaField(feature_name, "FLOAT64"))
+    for feature_name in SIMILARITY_FEATURE_COLUMNS:
+        fields.append(bigquery.SchemaField(f"norm_{feature_name}", "FLOAT64"))
+    return fields
+
+
+def _player_archetype_schema() -> List[bigquery.SchemaField]:
+    return [
+        bigquery.SchemaField("season", "STRING"),
+        bigquery.SchemaField("as_of_date", "DATE"),
+        bigquery.SchemaField("player_id", "INT64"),
+        bigquery.SchemaField("player_name", "STRING"),
+        bigquery.SchemaField("team_abbr", "STRING"),
+        bigquery.SchemaField("position", "STRING"),
+        bigquery.SchemaField("games_sampled", "INT64"),
+        bigquery.SchemaField("sample_status", "STRING"),
+        bigquery.SchemaField("archetype_id", "STRING"),
+        bigquery.SchemaField("archetype_label", "STRING"),
+        bigquery.SchemaField("cluster_confidence", "FLOAT64"),
+        bigquery.SchemaField("top_traits", "STRING"),
+        bigquery.SchemaField("archetype_summary", "STRING"),
+    ]
+
+
+def write_player_similarity_tables(
+    bq_client: bigquery.Client,
+    *,
+    features_table_id: str,
+    archetypes_table_id: str,
+    features_df: pd.DataFrame,
+    archetypes_df: pd.DataFrame,
+) -> None:
+    """Write similarity feature and archetype tables to BigQuery."""
+    seasons = sorted({str(value) for value in features_df["season"].dropna().unique()})
+    feature_table = bigquery.Table(
+        features_table_id, schema=_player_similarity_feature_schema()
+    )
+    archetype_table = bigquery.Table(
+        archetypes_table_id, schema=_player_archetype_schema()
+    )
+    bq_client.create_table(feature_table, exists_ok=True)
+    bq_client.create_table(archetype_table, exists_ok=True)
+
+    delete_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("seasons", "STRING", seasons),
+        ]
+    )
+    bq_client.query(
+        f"DELETE FROM `{features_table_id}` WHERE season IN UNNEST(@seasons)",
+        job_config=delete_config,
+    ).result()
+    bq_client.query(
+        f"DELETE FROM `{archetypes_table_id}` WHERE season IN UNNEST(@seasons)",
+        job_config=delete_config,
+    ).result()
+
+    feature_job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        schema=_player_similarity_feature_schema(),
+    )
+    archetype_job_config = bigquery.LoadJobConfig(
+        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
+        schema=_player_archetype_schema(),
+    )
+
+    bq_client.load_table_from_dataframe(
+        features_df, features_table_id, job_config=feature_job_config
+    ).result()
+    bq_client.load_table_from_dataframe(
+        archetypes_df, archetypes_table_id, job_config=archetype_job_config
+    ).result()

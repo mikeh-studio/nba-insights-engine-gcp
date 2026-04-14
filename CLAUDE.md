@@ -22,6 +22,7 @@ The target direction is:
 - Shared business logic lives in `dags/nba_pipeline.py`.
 - The current runtime ingests game logs, team line scores, player reference data, and schedule context into BigQuery bronze.
 - dbt now publishes scoring-contribution facts, richer player dimensions, and deterministic analysis snapshots for the app/API layer.
+- A batch similarity step now publishes `gold.player_similarity_features` and `gold.player_archetypes` after dbt completes, and the app surfaces archetype plus similar-player reads on player detail and compare.
 - The flow is still Python-task heavy in orchestration, but the warehouse contract is materially more production-shaped than the original notebook path.
 
 **Target state**
@@ -41,6 +42,7 @@ NBA API
   -> BigQuery bronze staging
   -> idempotent MERGE into bronze raw
   -> dbt silver/gold models in BigQuery
+  -> player similarity + archetype publish
   -> curated analytics tables and views
   -> optional AI/reporting outputs
   -> optional Redshift secondary warehouse sync (BQ -> GCS Parquet -> S3 -> Redshift COPY)
@@ -54,6 +56,7 @@ extract_incremental
   >> dq_gate
   >> merge_bronze_raw
   >> dbt_silver_gold
+  >> build_similarity_assets
   >> publish_run_metrics
   >> optional_reporting
 ```
@@ -92,6 +95,9 @@ Planned curated tables include:
 - `gold.fct_player_scoring_contribution`
 - `gold.dim_player`
 - `gold.player_trends`
+- `gold.player_similarity_feature_input`
+- `gold.player_similarity_features`
+- `gold.player_archetypes`
 - `gold.daily_leaderboard`
 - `gold.analysis_snapshots`
 
@@ -161,6 +167,7 @@ The repo currently uses environment variables and Airflow Variables. As the proj
 - `BQ_METADATA_DATASET`
 - `DBT_TARGET`
 - `NBA_SEASON`
+- `NBA_ARCHETYPE_CLUSTERS`
 - replay buffer and watermark settings
 - alerting or notification configuration
 - `ENABLE_REDSHIFT` and Redshift connection settings (see `.env.example`)
@@ -195,6 +202,7 @@ terraform plan
 Current local caveat:
 
 - `dbt test` still requires a real BigQuery-enabled project and working GCP auth. The profile fallback `local-project` is not sufficient.
+- `make airflow-parse` works against the repo-local `.venv-airflow` path when present, but live BigQuery validation is still gated by warehouse state, not code compilation.
 
 ## Working Guidance
 

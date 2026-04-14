@@ -9,13 +9,20 @@ export AIRFLOW_HOME ?= $(CURDIR)/airflow_home
 export AIRFLOW__CORE__DAGS_FOLDER ?= $(CURDIR)/dags
 export AIRFLOW__CORE__LOAD_EXAMPLES ?= False
 
+AIRFLOW_PYTHON := $(firstword $(wildcard $(CURDIR)/.venv-airflow/bin/python3*))
+ifeq ($(AIRFLOW_PYTHON),)
+AIRFLOW_CMD := airflow
+else
+AIRFLOW_CMD := $(AIRFLOW_PYTHON) -m airflow
+endif
+
 .PHONY: airflow-init airflow-create-user airflow-webserver airflow-scheduler airflow-trigger airflow-list airflow-parse
 
 airflow-init:
-	airflow db init
+	$(AIRFLOW_CMD) db init
 
 airflow-create-user:
-	airflow users create \
+	$(AIRFLOW_CMD) users create \
 		--username admin \
 		--firstname Local \
 		--lastname Admin \
@@ -24,16 +31,16 @@ airflow-create-user:
 		--password admin
 
 airflow-webserver:
-	airflow webserver --port 8080
+	$(AIRFLOW_CMD) webserver --port 8080
 
 airflow-scheduler:
-	airflow scheduler
+	$(AIRFLOW_CMD) scheduler
 
 airflow-trigger:
-	airflow dags trigger nba_analytics_pipeline
+	$(AIRFLOW_CMD) dags trigger nba_analytics_pipeline
 
 airflow-list:
-	airflow dags list
+	$(AIRFLOW_CMD) dags list
 
 airflow-parse:
-	airflow dags list-import-errors
+	$(AIRFLOW_CMD) dags list-import-errors
