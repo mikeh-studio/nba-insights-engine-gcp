@@ -1,14 +1,61 @@
 {% extends "base.html" %}
 {% block content %}
-  <section class="hero">
+  {% set top_signal = dashboard.signals[0] if dashboard.signals else None %}
+  <section class="hero hero-signal">
     <div class="hero-top">
       <div>
-        <h1>Stats Dashboard</h1>
+        <div class="eyebrow">
+          Today&#39;s top signal{% if dashboard.selected_as_of_date %} &middot; {{ dashboard.selected_as_of_date }}{% endif %}
+        </div>
+        {% if top_signal %}
+          <div class="hero-signal-row">
+            {% if top_signal.overall_rank %}
+              <div class="hero-rank" aria-hidden="true">#{{ top_signal.overall_rank }}</div>
+            {% endif %}
+            <div class="player-avatar large" aria-hidden="true">
+              {% if top_signal.headshot_url %}
+                <img src="{{ top_signal.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+              {% endif %}
+              <span class="player-avatar-fallback"{% if top_signal.headshot_url %} hidden{% endif %}>{{ top_signal.player_initials }}</span>
+            </div>
+            <div class="hero-signal-copy">
+              <h1><a href="/players/{{ top_signal.player_id }}">{{ top_signal.player_name }}</a></h1>
+              <p class="meta">
+                {{ top_signal.latest_team_abbr or "NBA" }} &middot; Score {{ top_signal.recommendation_score }}{% if top_signal.next_opponent_abbr %} &middot; Next {{ top_signal.next_opponent_abbr }}{% endif %}
+              </p>
+            </div>
+          </div>
+        {% else %}
+          <h1>Stats Dashboard</h1>
+        {% endif %}
       </div>
       <div class="hero-actions">
         <span class="status" title="{{ health.last_successful_finished_at_utc or '' }}">Last refresh {{ health.last_successful_finished_at_utc | time_ago }}</span>
       </div>
     </div>
+    {% if top_signal %}
+      <div class="chip-row">
+        {% for improvement in top_signal.top_improvements %}
+          <span class="chip improvement">{{ improvement.label }} +{{ improvement.delta }}</span>
+        {% endfor %}
+        {% if top_signal.category_strengths %}
+          <span class="chip">Strengths {{ top_signal.category_strengths }}</span>
+        {% endif %}
+        <span class="chip" title="Trend {{ top_signal.trend_status }}">
+          {% if top_signal.trend_direction == "up" %}
+            <span aria-hidden="true">&#8599;</span>
+          {% elif top_signal.trend_direction == "down" %}
+            <span aria-hidden="true">&#8600;</span>
+          {% else %}
+            <span aria-hidden="true">&#8594;</span>
+          {% endif %}
+          <span class="sr-only">Trend {{ top_signal.trend_status }}</span>
+        </span>
+      </div>
+      <div class="hero-actions">
+        <a class="button-link" href="/players/{{ top_signal.player_id }}">Open player detail</a>
+      </div>
+    {% endif %}
   </section>
 
   <section class="card">
@@ -32,14 +79,15 @@
 
   <section class="workspace">
     <div class="main-stack">
+      {% set support_signals = dashboard.signals[1:] if dashboard.signals else [] %}
       <article class="card">
         <div class="card-header">
           <h2>Signal Board</h2>
           <div class="meta">{{ dashboard.selected_as_of_date or "Unavailable" }}</div>
         </div>
-        {% if dashboard.signals %}
+        {% if support_signals %}
           <div class="signal-board">
-            {% for item in dashboard.signals %}
+            {% for item in support_signals %}
               <article class="signal">
                 <div class="signal-top">
                   <div class="identity-row">
@@ -77,6 +125,11 @@
                 </div>
               </article>
             {% endfor %}
+          </div>
+        {% elif top_signal %}
+          <div class="empty-state">
+            <strong>No additional signals for this day.</strong>
+            <p class="meta">The top signal is promoted above. Pick another day for more.</p>
           </div>
         {% else %}
           <div class="empty-state">

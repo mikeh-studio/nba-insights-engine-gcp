@@ -35,6 +35,9 @@
       {% if player_detail.trend.status %}
         <span class="chip">Trend {{ player_detail.trend.status }}</span>
       {% endif %}
+      {% if player_detail.archetype.archetype_label %}
+        <span class="chip">Archetype {{ player_detail.archetype.archetype_label }}</span>
+      {% endif %}
     </div>
     <div class="hero-actions">
       <a class="button-link secondary" href="/compare?player_a_id={{ player_detail.player.player_id }}">Compare player</a>
@@ -128,9 +131,82 @@
           </tbody>
         </table>
       </article>
+
+      <article class="card">
+        <div class="card-header">
+          <h2>Similar Players</h2>
+        </div>
+        {% if player_detail.panel_states.similarity == "fresh" and player_detail.similar_players %}
+          <div class="stack-list">
+            {% for item in player_detail.similar_players %}
+              <article class="tracked-card">
+                <div class="card-header">
+                  <div class="identity-row">
+                    <div class="player-avatar" aria-hidden="true">
+                      {% if item.headshot_url %}
+                        <img src="{{ item.headshot_url }}" alt="" loading="lazy" onerror="this.hidden=true; this.nextElementSibling.hidden=false;" />
+                      {% endif %}
+                      <span class="player-avatar-fallback"{% if item.headshot_url %} hidden{% endif %}>{{ item.player_initials }}</span>
+                    </div>
+                    <div>
+                      <h3><a href="/players/{{ item.player_id }}">{{ item.player_name }}</a></h3>
+                      <p class="meta">{{ item.team_abbr }} · {{ item.archetype_label }}</p>
+                    </div>
+                  </div>
+                  <span class="status">Similarity {{ item.similarity_score }}</span>
+                </div>
+                <div class="chip-row">
+                  {% for trait in item.shared_traits %}
+                    <span class="chip">Shared {{ trait }}</span>
+                  {% endfor %}
+                  {% for trait in item.contrasting_traits %}
+                    <span class="chip">Diff {{ trait }}</span>
+                  {% endfor %}
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>Similar-player matches are unavailable.</strong>
+            <p class="meta">{{ player_detail.similarity_reason or "The similarity model does not have a stable profile for this player yet." }}</p>
+          </div>
+        {% endif %}
+      </article>
     </div>
 
     <aside class="rail-stack">
+      <article class="card">
+        <div class="card-header">
+          <h2>Archetype</h2>
+        </div>
+        {% if player_detail.panel_states.archetype == "fresh" %}
+          <div class="metric-grid">
+            <div class="metric">
+              <div class="metric-label">Label</div>
+              <div class="metric-value">{{ player_detail.archetype.archetype_label }}</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Confidence</div>
+              <div class="metric-value">{{ player_detail.archetype.cluster_confidence }}</div>
+            </div>
+          </div>
+          {% if player_detail.archetype.summary %}
+            <p>{{ player_detail.archetype.summary }}</p>
+          {% endif %}
+          <div class="chip-row">
+            {% for trait in player_detail.archetype.top_traits %}
+              <span class="chip">{{ trait }}</span>
+            {% endfor %}
+          </div>
+        {% else %}
+          <div class="empty-state">
+            <strong>Archetype context is unavailable.</strong>
+            <p class="meta">This player does not yet have enough stable data for an archetype assignment.</p>
+          </div>
+        {% endif %}
+      </article>
+
       <article class="card">
         <div class="card-header">
           <h2>Opportunity Outlook</h2>

@@ -4,7 +4,7 @@ Production-style NBA data pipeline and public NBA stats workbench for the `2025-
 
 The v1 target architecture is:
 
-`NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> rankings + insights -> deterministic analysis snapshots -> Cloud Run site/API`
+`NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> player similarity + archetypes -> deterministic analysis snapshots -> Cloud Run site/API`
 
 With optional Redshift sync:
 
@@ -37,8 +37,9 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 7. Run DQ checks for game logs, line scores, player reference, and schedule context.
 8. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
 9. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
-10. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
-11. Publish watermark and run metadata to `nba_metadata`.
+10. Build player similarity vectors and archetype clusters from `gold.player_similarity_feature_input`, then publish `gold.player_similarity_features` and `gold.player_archetypes`.
+11. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
+12. Publish watermark and run metadata to `nba_metadata`.
 
 ## Optional Redshift Secondary Warehouse
 
@@ -66,6 +67,9 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 - `gold.player_category_profile`: category-score profile for the ranking surface
 - `gold.player_opportunity_outlook`: schedule-only opportunity context
 - `gold.player_fantasy_rankings`: deterministic ranking surface
+- `gold.player_similarity_feature_input`: clustering feature table built from season-to-date and recent-form stat shape
+- `gold.player_similarity_features`: normalized similarity vectors plus per-player summary traits
+- `gold.player_archetypes`: batch-assigned archetype labels and confidence by player
 - `gold.workbench_compare`: fixed-window compare input model for bounded compare windows
 - `gold.workbench_dashboard`: dashboard-oriented player read model with bounded reason fields
 - `gold.workbench_home_dashboard`: seven-day dashboard snapshot model keyed by `as_of_date`
@@ -76,7 +80,7 @@ Data flows from BigQuery bronze as Parquet through GCS to S3, then loads into Re
 
 dbt is intentionally centered on `2025-26` only. The silver layer filters to that season and the accepted in-season date window.
 
-The workbench read models are warehouse preparation for the next app slice. The current FastAPI routes still read from the existing gold tables in this PR.
+The FastAPI service now reads from the similarity outputs in addition to the existing gold and metadata tables. Player detail uses `gold.player_similarity_features` and `gold.player_archetypes`, and compare adds a stat-profile similarity summary when both players have stable feature vectors.
 
 When Redshift sync is enabled, bronze tables are also available in Redshift under the configured schema (default `nba_bronze`).
 
@@ -113,6 +117,10 @@ The compare page supports two entry modes: direct `player_a_id` deep links and f
 
 `/api/analysis/latest` now returns the existing narrative fields plus nested `score_contribution` and `player_context` sections sourced from the expanded snapshot record.
 
+`/api/players/{player_id}` now includes `archetype`, `similar_players`, and `similarity_reason` fields, and the player page renders an archetype card plus a similar-player panel when the sample is stable.
+
+`/api/compare` now includes a `similarity` block with pair score, shared traits, and contrasting traits, and the compare page renders that stat-profile summary inline.
+
 ## Local Setup
 
 1. Create and activate a virtual environment.
@@ -141,6 +149,7 @@ BQ_METADATA_DATASET=nba_metadata
 BQ_LOCATION=US
 NBA_MAX_PLAYERS=0
 NBA_REPLAY_DAYS=3
+NBA_ARCHETYPE_CLUSTERS=6
 NBA_SCHEDULE_LOOKAHEAD_DAYS=7
 DBT_TARGET=dev
 API_FRESHNESS_THRESHOLD_HOURS=36
@@ -155,7 +164,8 @@ ENABLE_REDSHIFT=false
 This repo supports a host-based Airflow workflow without Docker. The included `Makefile`
 standardizes the repo-local `AIRFLOW_HOME` path and points Airflow at `dags/`.
 If a `.env` file exists in the repo root, `make` exports those variables into the Airflow
-commands automatically.
+commands automatically. If `airflow` is not on your global `PATH`, the `Makefile` falls back
+to the repo-local `.venv-airflow` Python and runs `python -m airflow`.
 
 Initialize the local Airflow metadata database:
 
@@ -208,6 +218,8 @@ PYTHONPATH=. pytest
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
   --exclude source:gold_runtime.analysis_snapshots path:dbt/tests/no_duplicate_analysis_snapshots.sql
+dbt build --project-dir . --profiles-dir dbt/profiles --target dev \
+  --select player_similarity_feature_input
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev \
   --select workbench_compare workbench_dashboard workbench_home_dashboard workbench_player_detail
 ```
@@ -229,8 +241,9 @@ Current local validation caveats:
 - `dbt build --target redshift --select path:dbt/models/silver` is the recommended compatibility check for the Redshift secondary warehouse and requires working Redshift credentials plus the `dbt-redshift` adapter.
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - The targeted workbench-model `dbt test --select ...` command has the same BigQuery auth requirement.
-- Airflow parse checks require the Airflow CLI/module to be installed in the active environment.
-- As of April 5, 2026, local validation in this repo passes `compileall`, `PYTHONPATH=. pytest`, and `dbt parse`; `dbt test` is still blocked without a real BigQuery-enabled project instead of the profile fallback `local-project`.
+- In the latest local validation run for this branch, `python -m compileall dags app tests`, `PYTHONPATH=. pytest`, `dbt parse`, and `make airflow-parse` all pass.
+- In the latest live `dbt test` run for this branch, the configured BigQuery project is reachable but the warehouse still has existing environment issues, including missing bronze and gold tables in `nba-data-485505`.
+- In the latest targeted `dbt build --select player_similarity_feature_input` run for this branch, warehouse execution fails because upstream table `nba_gold.fct_player_scoring_contribution` is missing, so the DS layer is not yet green in the live project.
 
 ## Security Hygiene
 
