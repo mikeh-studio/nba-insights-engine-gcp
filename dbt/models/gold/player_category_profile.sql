@@ -91,6 +91,7 @@ select
         + coalesce({{ safe_divide('p.avg_ast - b.league_avg_ast', 'nullif(b.league_sd_ast, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_stl - b.league_avg_stl', 'nullif(b.league_sd_stl, 0)') }}, 0)
         + coalesce({{ safe_divide('p.avg_blk - b.league_avg_blk', 'nullif(b.league_sd_blk, 0)') }}, 0)
+        ,
         2
     ) as category_score_6cat,
     round(
@@ -104,7 +105,7 @@ select
     ) as category_score_7cat,
     6 as available_category_count,
     8 as target_category_count,
-    'partial_until_fg_ft_available_no_tov' as category_coverage_status
+    'partial_until_fg_ft_available' as category_coverage_status
 from player_means p
 left join latest_team t
     on p.season = t.season

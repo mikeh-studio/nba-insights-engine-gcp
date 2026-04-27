@@ -22,10 +22,16 @@ select
     t.team_pts_qtr4,
     t.team_pts_ot_total,
     t.scoring_margin,
-    round({{ safe_divide('p.pts', 'nullif(t.team_pts, 0)') }}, 4) as player_points_share_of_team,
-    round(
-        {{ safe_divide('p.pts', 'nullif(t.team_pts + coalesce(t.opponent_team_pts, 0), 0)') }},
-        4
+    coalesce(
+        round({{ safe_divide('p.pts', 'nullif(t.team_pts, 0)') }}, 4),
+        0
+    ) as player_points_share_of_team,
+    coalesce(
+        round(
+            {{ safe_divide('p.pts', 'nullif(t.team_pts + coalesce(t.opponent_team_pts, 0), 0)') }},
+            4
+        ),
+        0
     ) as player_points_share_of_game,
     p.ingested_at_utc
 from {{ ref('fct_player_game_stats') }} p

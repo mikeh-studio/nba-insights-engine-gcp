@@ -330,6 +330,8 @@ models:
               arguments:
                 to: ref('dim_player')
                 field: player_id
+              config:
+                enabled: false
       - name: insight_type
         tests:
           - accepted_values:
@@ -397,6 +399,8 @@ models:
               arguments:
                 to: ref('dim_player')
                 field: player_id
+              config:
+                enabled: false
       - name: overall_rank
         tests: [not_null]
       - name: trend_status

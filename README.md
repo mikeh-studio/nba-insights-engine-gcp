@@ -242,11 +242,13 @@ Current local validation caveats:
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - The targeted workbench-model `dbt test --select ...` command has the same BigQuery auth requirement.
 - In the latest local validation run for this branch, `python -m compileall dags app tests`, `PYTHONPATH=. pytest`, `dbt parse`, and `make airflow-parse` all pass.
-- In the latest live `dbt test` run for this branch, the configured BigQuery project is reachable but the warehouse still has existing environment issues, including missing bronze and gold tables in `nba-data-485505`.
-- In the latest targeted `dbt build --select player_similarity_feature_input` run for this branch, warehouse execution fails because upstream table `nba_gold.fct_player_scoring_contribution` is missing, so the DS layer is not yet green in the live project.
+- In the latest live validation run for this branch, the configured BigQuery project `nba-data-485505` is reachable and the minimum core chain builds successfully:
+  `dim_player dim_team dim_game fct_player_game_stats fct_team_game_scores fct_player_scoring_contribution player_recent_form player_similarity_feature_input`.
+- Live Airflow orchestration still needs follow-up hardening: the local `make airflow-trigger` path did not find the DAG in `DagModel`, and direct DAG testing hit NBA API timeouts. The warehouse was repaired directly in BigQuery for this validation pass.
 
 ## Security Hygiene
 
 - Runtime services read from GCP auth and environment configuration; credentials must not be committed.
 - The public service is read-only and only queries curated gold and metadata tables.
+- Pipeline triage artifacts are operational reports. They redact obvious credential-looking tokens before writing subprocess failure summaries, but runtime logs and ignored local `.env` files should still be treated as sensitive.
 - Any previously used Anthropic credentials should be treated as local-only and rotated if they were ever stored outside ignored files.
