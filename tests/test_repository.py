@@ -1,8 +1,32 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
-from app.repository import build_analysis_payload, build_freshness_payload
+from google.api_core.exceptions import BadRequest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.config import Settings
+from app.repository import (
+    BigQueryWarehouseRepository,
+    build_analysis_payload,
+    build_freshness_payload,
+)
+
+
+def _build_repository() -> BigQueryWarehouseRepository:
+    return BigQueryWarehouseRepository(
+        Settings(
+            project_id="local-project",
+            gold_dataset="nba_gold",
+            metadata_dataset="nba_metadata",
+            freshness_threshold_hours=36,
+            max_search_results=12,
+        ),
+        client=object(),
+    )
 
 
 def test_build_freshness_payload_fresh() -> None:
@@ -75,3 +99,57 @@ def test_build_analysis_payload_nests_structured_sections() -> None:
     assert payload["player_context"]["position"] == "G"
     assert payload["player_context"]["roster_status"] is True
     assert payload["player_context"]["weight"] == 200
+
+
+def test_fetch_similarity_anchor_returns_none_on_bigquery_error(monkeypatch) -> None:
+    repo = _build_repository()
+
+    def fake_query(*_args, **_kwargs):
+        raise BadRequest("similarity table missing")
+
+    monkeypatch.setattr(repo, "_query", fake_query)
+
+    assert repo._fetch_similarity_anchor(7) is None
+
+
+def test_get_similar_players_returns_unavailable_on_bigquery_error(
+    monkeypatch,
+) -> None:
+    repo = _build_repository()
+
+    def fake_query(*_args, **_kwargs):
+        raise BadRequest("similarity table missing")
+
+    monkeypatch.setattr(repo, "_query", fake_query)
+
+    state, reason, players = repo._get_similar_players(
+        7,
+        anchor={
+            "sample_status": "ready",
+            "top_traits": "playmaking, usage share",
+        },
+    )
+
+    assert state == "unavailable"
+    assert reason == "Similarity profile is unavailable."
+    assert players == []
+
+
+def test_get_pair_similarity_returns_unavailable_when_similarity_query_fails(
+    monkeypatch,
+) -> None:
+    repo = _build_repository()
+
+    def fake_query(*_args, **_kwargs):
+        raise BadRequest("similarity table missing")
+
+    monkeypatch.setattr(repo, "_query", fake_query)
+
+    payload = repo._get_pair_similarity(7, 11)
+
+    assert payload["state"] == "unavailable"
+    assert payload["score"] is None
+    assert (
+        payload["summary"]
+        == "Similarity profile is unavailable for at least one player."
+    )

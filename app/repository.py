@@ -845,13 +845,16 @@ class BigQueryWarehouseRepository:
           AND player_id = @player_id
         LIMIT 1
         """
-        rows = self._query(
-            sql,
-            [
-                bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
-                bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
-            ],
-        )
+        try:
+            rows = self._query(
+                sql,
+                [
+                    bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+                    bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+                ],
+            )
+        except BQAPIError:
+            return None
         return rows[0] if rows else None
 
     def _get_similar_players(
@@ -914,14 +917,17 @@ class BigQueryWarehouseRepository:
         ORDER BY euclidean_distance ASC, player_name
         LIMIT @limit
         """
-        rows = self._query(
-            sql,
-            [
-                bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
-                bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
-                bigquery.ScalarQueryParameter("limit", "INT64", limit),
-            ],
-        )
+        try:
+            rows = self._query(
+                sql,
+                [
+                    bigquery.ScalarQueryParameter("season", "STRING", SUPPORTED_SEASON),
+                    bigquery.ScalarQueryParameter("player_id", "INT64", player_id),
+                    bigquery.ScalarQueryParameter("limit", "INT64", limit),
+                ],
+            )
+        except BQAPIError:
+            return STATE_UNAVAILABLE, "Similarity profile is unavailable.", []
 
         items: list[dict[str, Any]] = []
         for row in rows:

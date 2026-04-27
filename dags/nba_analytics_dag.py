@@ -15,6 +15,11 @@ from pathlib import Path
 
 from airflow.decorators import dag, task
 from airflow.models import Variable
+from nba_pipeline_triage import (
+    summarize_subprocess_failure,
+    write_pipeline_triage_on_failure,
+    write_pipeline_triage_on_success,
+)
 
 logger = logging.getLogger("nba_pipeline")
 SUPPORTED_SEASON = "2025-26"
@@ -62,6 +67,7 @@ default_args = {
     "retries": 1,
     "retry_delay": timedelta(minutes=2),
     "execution_timeout": timedelta(minutes=45),
+    "on_failure_callback": write_pipeline_triage_on_failure,
 }
 
 
@@ -74,6 +80,7 @@ default_args = {
     max_active_runs=1,
     dagrun_timeout=timedelta(hours=2),
     default_args=default_args,
+    on_success_callback=write_pipeline_triage_on_success,
     tags=["nba", "airflow", "bigquery", "dbt", "self-hosted"],
 )
 def nba_analytics_pipeline():
@@ -762,6 +769,8 @@ def nba_analytics_pipeline():
     @task(retries=1, retry_delay=timedelta(minutes=2))
     def dbt_build(merge_result: dict) -> dict:
         """Run dbt models and tests after the bronze merges."""
+        from airflow.exceptions import AirflowException
+
         if not merge_result["should_build"]:
             logger.info("Skipping dbt build because no source domain produced rows")
             merge_result["dbt_status"] = "skipped"
@@ -794,8 +803,24 @@ def nba_analytics_pipeline():
         )
         env.setdefault("BQ_DATASET_GOLD", get_dataset("BQ_DATASET_GOLD", "nba_gold"))
         env.setdefault("NBA_SEASON", SUPPORTED_SEASON)
-
-        subprocess.run(command, cwd=repo_root, env=env, check=True)
+        merge_result["dbt_command"] = " ".join(command)
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise AirflowException(
+                summarize_subprocess_failure(
+                    command=command,
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            )
         merge_result["dbt_status"] = "success"
         return merge_result
 
@@ -1172,6 +1197,8 @@ def nba_analytics_pipeline():
     @task(retries=1, retry_delay=timedelta(minutes=5))
     def dbt_build_redshift(combined_result: dict) -> dict:
         """Run dbt build targeting Redshift."""
+        from airflow.exceptions import AirflowException
+
         repo_root = get_dbt_repo_root()
         profiles_dir = repo_root / "dbt" / "profiles"
         command = [
@@ -1191,7 +1218,23 @@ def nba_analytics_pipeline():
         env = os.environ.copy()
         env.setdefault("BQ_PROJECT", get_project_id())
         env.setdefault("NBA_SEASON", SUPPORTED_SEASON)
-        subprocess.run(command, cwd=repo_root, env=env, check=True)
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise AirflowException(
+                summarize_subprocess_failure(
+                    command=command,
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                )
+            )
         combined_result["redshift_dbt_status"] = "success"
         return combined_result
 

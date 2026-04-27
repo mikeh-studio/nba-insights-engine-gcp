@@ -202,7 +202,8 @@ terraform plan
 Current local caveat:
 
 - `dbt test` still requires a real BigQuery-enabled project and working GCP auth. The profile fallback `local-project` is not sufficient.
-- `make airflow-parse` works against the repo-local `.venv-airflow` path when present, but live BigQuery validation is still gated by warehouse state, not code compilation.
+- `make airflow-parse` works against the repo-local `.venv-airflow` path when present.
+- The latest live BigQuery validation on this branch built the minimum core gold chain through `gold.fct_player_scoring_contribution` and `gold.player_similarity_feature_input`. Airflow trigger/bootstrap still needs follow-up because local `make airflow-trigger` did not find the DAG in `DagModel`, and direct DAG testing hit NBA API timeouts.
 
 ## Working Guidance
 

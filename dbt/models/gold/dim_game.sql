@@ -5,15 +5,18 @@
 
 with team_scores as (
     select
-        game_id,
-        game_date,
-        season,
-        team_abbr,
-        home_away,
-        sum(coalesce(pts, 0)) as team_pts,
-        max(ingested_at_utc) as ingested_at_utc
-    from {{ ref('int_player_game_enriched') }}
-    group by 1, 2, 3, 4, 5
+        t.game_id,
+        t.game_date,
+        t.season,
+        t.team_id,
+        t.team_abbr,
+        t.team_pts,
+        s.home_away,
+        t.ingested_at_utc
+    from {{ ref('fct_team_game_scores') }} t
+    left join {{ ref('stg_schedule_clean') }} s
+        on t.game_id = s.game_id
+       and t.team_abbr = s.team_abbr
 ),
 game_rollup as (
     select
