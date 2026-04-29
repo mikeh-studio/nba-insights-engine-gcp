@@ -3,45 +3,115 @@
     schema=env_var('BQ_DATASET_GOLD', env_var('BQ_DATASET', 'nba_gold'))
 ) }}
 
-with team_scores as (
+with line_scores as (
+    select *
+    from {{ ref('stg_game_line_scores_clean') }}
+),
+player_team_context as (
     select
         game_id,
-        game_date,
-        season,
-        team_id,
+        max(game_date) as game_date,
+        max(season) as season,
         team_abbr,
-        team_city_name,
-        team_nickname,
-        team_wins_losses,
-        pts_qtr1,
-        pts_qtr2,
-        pts_qtr3,
-        pts_qtr4,
-        pts_ot1,
-        pts_ot2,
-        pts_ot3,
-        pts_ot4,
-        pts_ot5,
-        pts_ot6,
-        pts_ot7,
-        pts_ot8,
-        pts_ot9,
-        pts_ot10,
-        pts as team_pts,
+        max(opponent_abbr) as opponent_team_abbr,
+        sum(coalesce(pts, 0)) as player_team_pts,
+        case
+            when max(case when home_away = 'HOME' then 1 else 0 end) = 1 then 'HOME'
+            when max(case when home_away = 'AWAY' then 1 else 0 end) = 1 then 'AWAY'
+            else null
+        end as player_home_away,
+        max(ingested_at_utc) as ingested_at_utc
+    from {{ ref('int_player_game_enriched') }}
+    group by game_id, team_abbr
+),
+line_team_scores as (
+    select
+        l.game_id,
+        l.game_date,
+        l.season,
+        l.team_id,
+        l.team_abbr,
+        l.team_city_name,
+        l.team_nickname,
+        l.team_wins_losses,
+        p.player_home_away as home_away,
+        l.pts_qtr1,
+        l.pts_qtr2,
+        l.pts_qtr3,
+        l.pts_qtr4,
+        l.pts_ot1,
+        l.pts_ot2,
+        l.pts_ot3,
+        l.pts_ot4,
+        l.pts_ot5,
+        l.pts_ot6,
+        l.pts_ot7,
+        l.pts_ot8,
+        l.pts_ot9,
+        l.pts_ot10,
+        case
+            when coalesce(l.pts, 0) = 0 and coalesce(p.player_team_pts, 0) > 0
+                then p.player_team_pts
+            else l.pts
+        end as team_pts,
         (
-            coalesce(pts_ot1, 0)
-            + coalesce(pts_ot2, 0)
-            + coalesce(pts_ot3, 0)
-            + coalesce(pts_ot4, 0)
-            + coalesce(pts_ot5, 0)
-            + coalesce(pts_ot6, 0)
-            + coalesce(pts_ot7, 0)
-            + coalesce(pts_ot8, 0)
-            + coalesce(pts_ot9, 0)
-            + coalesce(pts_ot10, 0)
+            coalesce(l.pts_ot1, 0)
+            + coalesce(l.pts_ot2, 0)
+            + coalesce(l.pts_ot3, 0)
+            + coalesce(l.pts_ot4, 0)
+            + coalesce(l.pts_ot5, 0)
+            + coalesce(l.pts_ot6, 0)
+            + coalesce(l.pts_ot7, 0)
+            + coalesce(l.pts_ot8, 0)
+            + coalesce(l.pts_ot9, 0)
+            + coalesce(l.pts_ot10, 0)
         ) as team_pts_ot_total,
-        ingested_at_utc
-    from {{ ref('stg_game_line_scores_clean') }}
+        l.ingested_at_utc
+    from line_scores l
+    left join player_team_context p
+        on l.game_id = p.game_id
+       and l.team_abbr = p.team_abbr
+),
+player_only_team_scores as (
+    select
+        p.game_id,
+        p.game_date,
+        p.season,
+        d.team_id,
+        p.team_abbr,
+        d.team_city_name,
+        d.team_nickname,
+        cast(null as {{ varchar_type() }}) as team_wins_losses,
+        p.player_home_away as home_away,
+        cast(0 as {{ int64_type() }}) as pts_qtr1,
+        cast(0 as {{ int64_type() }}) as pts_qtr2,
+        cast(0 as {{ int64_type() }}) as pts_qtr3,
+        cast(0 as {{ int64_type() }}) as pts_qtr4,
+        cast(0 as {{ int64_type() }}) as pts_ot1,
+        cast(0 as {{ int64_type() }}) as pts_ot2,
+        cast(0 as {{ int64_type() }}) as pts_ot3,
+        cast(0 as {{ int64_type() }}) as pts_ot4,
+        cast(0 as {{ int64_type() }}) as pts_ot5,
+        cast(0 as {{ int64_type() }}) as pts_ot6,
+        cast(0 as {{ int64_type() }}) as pts_ot7,
+        cast(0 as {{ int64_type() }}) as pts_ot8,
+        cast(0 as {{ int64_type() }}) as pts_ot9,
+        cast(0 as {{ int64_type() }}) as pts_ot10,
+        p.player_team_pts as team_pts,
+        cast(0 as {{ int64_type() }}) as team_pts_ot_total,
+        p.ingested_at_utc
+    from player_team_context p
+    left join line_scores l
+        on p.game_id = l.game_id
+       and p.team_abbr = l.team_abbr
+    left join {{ ref('dim_team') }} d
+        on p.team_abbr = d.team_abbr
+    where l.game_id is null
+),
+team_scores as (
+    select * from line_team_scores
+    union all
+    select * from player_only_team_scores
 ),
 with_opponent as (
     select
@@ -53,6 +123,7 @@ with_opponent as (
         t.team_city_name,
         t.team_nickname,
         t.team_wins_losses,
+        t.home_away,
         o.team_id as opponent_team_id,
         o.team_abbr as opponent_team_abbr,
         o.team_pts as opponent_team_pts,

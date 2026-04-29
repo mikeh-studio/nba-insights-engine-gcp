@@ -287,8 +287,348 @@ def test_ensure_table_has_columns_adds_expected_columns():
     ]
 
 
+def test_calculate_nba_api_retry_delay_uses_bounded_backoff():
+    assert (
+        pipeline.calculate_nba_api_retry_delay(
+            1,
+            base_delay=1.0,
+            backoff_multiplier=2.0,
+            max_delay=8.0,
+        )
+        == 1.0
+    )
+    assert (
+        pipeline.calculate_nba_api_retry_delay(
+            3,
+            base_delay=1.0,
+            backoff_multiplier=2.0,
+            max_delay=8.0,
+        )
+        == 4.0
+    )
+    assert (
+        pipeline.calculate_nba_api_retry_delay(
+            5,
+            base_delay=1.0,
+            backoff_multiplier=2.0,
+            max_delay=8.0,
+        )
+        == 8.0
+    )
+
+
+def _player_game_log_api_frame():
+    return pd.DataFrame(
+        [
+            {
+                "Game_ID": "0022500001",
+                "GAME_DATE": "2026-02-10",
+                "MATCHUP": "BOS vs. NYK",
+                "WL": "W",
+                "MIN": 30,
+                "FGM": 10,
+                "FGA": 20,
+                "FG_PCT": 0.5,
+                "FG3M": 2,
+                "FG3A": 6,
+                "FG3_PCT": 0.333,
+                "FTM": 4,
+                "FTA": 5,
+                "FT_PCT": 0.8,
+                "OREB": 1,
+                "DREB": 4,
+                "PTS": 26,
+                "REB": 5,
+                "AST": 3,
+                "STL": 1,
+                "BLK": 0,
+                "TOV": 2,
+                "PF": 1,
+                "PLUS_MINUS": 7,
+            }
+        ]
+    )
+
+
+def test_get_player_game_log_passes_timeout_to_nba_api(monkeypatch):
+    captured = {}
+
+    class FakePlayerGameLog:
+        def __init__(self, *, player_id, season, timeout):
+            captured["player_id"] = player_id
+            captured["season"] = season
+            captured["timeout"] = timeout
+
+        def get_data_frames(self):
+            return [_player_game_log_api_frame()]
+
+    monkeypatch.setattr(pipeline.playergamelog, "PlayerGameLog", FakePlayerGameLog)
+
+    result = pipeline.get_player_game_log(7, timeout=4.5, retries=1)
+
+    assert captured == {"player_id": 7, "season": "2025-26", "timeout": 4.5}
+    assert len(result) == 1
+    assert result.iloc[0]["GAME_ID"] == "0022500001"
+
+
+def _line_score_api_frame():
+    return pd.DataFrame(
+        [
+            {
+                "GAME_DATE_EST": "2026-02-10",
+                "GAME_ID": "0022500001",
+                "TEAM_ID": 1610612738,
+                "TEAM_ABBREVIATION": "BOS",
+                "TEAM_CITY_NAME": "Boston",
+                "TEAM_NICKNAME": "Celtics",
+                "TEAM_WINS_LOSSES": "40-10",
+                "PTS_QTR1": 30,
+                "PTS_QTR2": 25,
+                "PTS_QTR3": 20,
+                "PTS_QTR4": 35,
+                "PTS_OT1": 0,
+                "PTS_OT2": 0,
+                "PTS_OT3": 0,
+                "PTS_OT4": 0,
+                "PTS_OT5": 0,
+                "PTS_OT6": 0,
+                "PTS_OT7": 0,
+                "PTS_OT8": 0,
+                "PTS_OT9": 0,
+                "PTS_OT10": 0,
+                "PTS": 110,
+            }
+        ]
+    )
+
+
+def test_get_game_line_scores_passes_timeout_to_nba_api(monkeypatch):
+    captured = {}
+
+    class FakeBoxScoreSummary:
+        def __init__(self, *, game_id, timeout):
+            captured["game_id"] = game_id
+            captured["timeout"] = timeout
+
+        def get_available_data(self):
+            return ["LineScore"]
+
+        def get_data_frames(self):
+            return [_line_score_api_frame()]
+
+    monkeypatch.setattr(
+        pipeline.boxscoresummaryv2, "BoxScoreSummaryV2", FakeBoxScoreSummary
+    )
+
+    result = pipeline.get_game_line_scores("0022500001", timeout=5, retries=1)
+
+    assert captured == {"game_id": "0022500001", "timeout": 5}
+    assert len(result) == 1
+    assert result.iloc[0]["TEAM_ABBR"] == "BOS"
+
+
+def test_get_game_line_scores_accepts_dict_keys_available_data(monkeypatch):
+    class FakeBoxScoreSummary:
+        def __init__(self, *, game_id, timeout):
+            pass
+
+        def get_available_data(self):
+            return {"LineScore": None}.keys()
+
+        def get_data_frames(self):
+            return [_line_score_api_frame()]
+
+    monkeypatch.setattr(
+        pipeline.boxscoresummaryv2, "BoxScoreSummaryV2", FakeBoxScoreSummary
+    )
+
+    result = pipeline.get_game_line_scores("0022500001", retries=1)
+
+    assert len(result) == 1
+    assert result.iloc[0]["TEAM_ABBR"] == "BOS"
+
+
+def test_get_game_line_scores_soft_fails_after_retries(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class FailingBoxScoreSummary:
+        def __init__(self, *, game_id, timeout):
+            calls.append((game_id, timeout))
+            raise TimeoutError("line score timeout")
+
+    monkeypatch.setattr(
+        pipeline.boxscoresummaryv2, "BoxScoreSummaryV2", FailingBoxScoreSummary
+    )
+    monkeypatch.setattr(pipeline.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = pipeline.get_game_line_scores(
+        "0022500001",
+        timeout=2,
+        retries=2,
+        retry_base_delay=0,
+        retry_max_delay=0,
+    )
+
+    assert result.empty
+    assert calls == [("0022500001", 2), ("0022500001", 2)]
+    assert sleeps == [0]
+
+
+def _player_reference_api_frame():
+    return pd.DataFrame(
+        [
+            {
+                "PERSON_ID": 7,
+                "FIRST_NAME": "Test",
+                "LAST_NAME": "Player",
+                "DISPLAY_FIRST_LAST": "Test Player",
+                "PLAYER_SLUG": "test-player",
+                "BIRTHDATE": "2000-01-01",
+                "SCHOOL": "Example U",
+                "COUNTRY": "USA",
+                "LAST_AFFILIATION": "Example U",
+                "HEIGHT": "6-5",
+                "WEIGHT": 210,
+                "SEASON_EXP": 2,
+                "JERSEY": "7",
+                "POSITION": "G",
+                "ROSTERSTATUS": 1,
+                "TEAM_ID": 1610612738,
+                "TEAM_NAME": "Celtics",
+                "TEAM_ABBREVIATION": "BOS",
+                "TEAM_CODE": "celtics",
+                "TEAM_CITY": "Boston",
+                "FROM_YEAR": 2023,
+                "TO_YEAR": 2026,
+                "DRAFT_YEAR": "2023",
+                "DRAFT_ROUND": "1",
+                "DRAFT_NUMBER": "7",
+            }
+        ]
+    )
+
+
+def test_get_player_reference_passes_timeout_to_nba_api(monkeypatch):
+    captured = {}
+
+    class FakeCommonPlayerInfo:
+        def __init__(self, *, player_id, timeout):
+            captured["player_id"] = player_id
+            captured["timeout"] = timeout
+
+        def get_available_data(self):
+            return ["CommonPlayerInfo"]
+
+        def get_data_frames(self):
+            return [_player_reference_api_frame()]
+
+    monkeypatch.setattr(
+        pipeline.commonplayerinfo, "CommonPlayerInfo", FakeCommonPlayerInfo
+    )
+
+    result = pipeline.get_player_reference(7, timeout=6, retries=1)
+
+    assert captured == {"player_id": 7, "timeout": 6}
+    assert len(result) == 1
+    assert result.iloc[0]["PLAYER_NAME"] == "Test Player"
+
+
+def test_get_player_reference_accepts_dict_keys_available_data(monkeypatch):
+    class FakeCommonPlayerInfo:
+        def __init__(self, *, player_id, timeout):
+            pass
+
+        def get_available_data(self):
+            return {"CommonPlayerInfo": None}.keys()
+
+        def get_data_frames(self):
+            return [_player_reference_api_frame()]
+
+    monkeypatch.setattr(
+        pipeline.commonplayerinfo, "CommonPlayerInfo", FakeCommonPlayerInfo
+    )
+
+    result = pipeline.get_player_reference(7, retries=1)
+
+    assert len(result) == 1
+    assert result.iloc[0]["PLAYER_NAME"] == "Test Player"
+
+
+def test_get_player_reference_soft_fails_after_retries(monkeypatch):
+    calls = []
+
+    class FailingCommonPlayerInfo:
+        def __init__(self, *, player_id, timeout):
+            calls.append((player_id, timeout))
+            raise TimeoutError("player reference timeout")
+
+    monkeypatch.setattr(
+        pipeline.commonplayerinfo, "CommonPlayerInfo", FailingCommonPlayerInfo
+    )
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    result = pipeline.get_player_reference(
+        7,
+        timeout=2,
+        retries=2,
+        retry_base_delay=0,
+        retry_max_delay=0,
+    )
+
+    assert result.empty
+    assert calls == [(7, 2), (7, 2)]
+
+
+def test_get_upcoming_schedule_soft_fails_after_retries(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class FailingSchedule:
+        def __init__(self, *, season, timeout):
+            calls.append((season, timeout))
+            raise TimeoutError("schedule timeout")
+
+    monkeypatch.setattr(pipeline.scheduleleaguev2, "ScheduleLeagueV2", FailingSchedule)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = pipeline.get_upcoming_schedule(
+        timeout=3,
+        retries=2,
+        retry_base_delay=0,
+        retry_max_delay=0,
+    )
+
+    assert result.empty
+    assert result.columns.tolist() == [
+        field.name for field in pipeline.get_schedule_schema()
+    ]
+    assert calls == [("2025-26", 3), ("2025-26", 3)]
+    assert sleeps == [0]
+
+
+def test_get_all_player_game_logs_still_raises_when_all_players_fail(monkeypatch):
+    monkeypatch.setattr(
+        pipeline,
+        "get_player_game_log",
+        lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+
+    try:
+        pipeline.get_all_player_game_logs(
+            [{"id": 7, "full_name": "Test Player"}],
+            delay=0,
+            retry_base_delay=0,
+            retry_max_delay=0,
+        )
+    except RuntimeError as exc:
+        assert "No game logs were fetched" in str(exc)
+    else:
+        raise AssertionError("Expected all-empty game-log extraction to raise")
+
+
 def test_get_all_game_line_scores_dedupes_by_game_and_team(monkeypatch):
-    def fake_get_game_line_scores(game_id: str, *, season: str = "2025-26"):
+    def fake_get_game_line_scores(game_id: str, *, season: str = "2025-26", **_kwargs):
         return pd.DataFrame(
             [
                 {
@@ -357,7 +697,7 @@ def test_get_all_game_line_scores_dedupes_by_game_and_team(monkeypatch):
 
 
 def test_get_all_player_references_dedupes_by_player_id(monkeypatch):
-    def fake_get_player_reference(player_id: int):
+    def fake_get_player_reference(player_id: int, **_kwargs):
         return pd.DataFrame(
             [
                 {
@@ -400,6 +740,158 @@ def test_get_all_player_references_dedupes_by_player_id(monkeypatch):
 
     assert len(result) == 1
     assert result.iloc[0]["PLAYER_ID"] == 7
+
+
+def _bootstrap_game_logs_sample():
+    return pd.DataFrame(
+        [
+            {
+                "GAME_DATE": "2026-02-10",
+                "GAME_ID": "0022500001",
+                "MATCHUP": "BOS vs. NYK",
+                "PTS": 30,
+                "SEASON": "2025-26",
+                "PLAYER_ID": 1,
+                "PLAYER_NAME": "Test Scorer",
+                "INGESTED_AT_UTC": "2026-02-10T12:00:00+00:00",
+            },
+            {
+                "GAME_DATE": "2026-02-10",
+                "GAME_ID": "0022500001",
+                "MATCHUP": "BOS vs. NYK",
+                "PTS": 20,
+                "SEASON": "2025-26",
+                "PLAYER_ID": 2,
+                "PLAYER_NAME": "Second Celtic",
+                "INGESTED_AT_UTC": "2026-02-10T12:05:00+00:00",
+            },
+            {
+                "GAME_DATE": "2026-02-10",
+                "GAME_ID": "0022500001",
+                "MATCHUP": "NYK @ BOS",
+                "PTS": 40,
+                "SEASON": "2025-26",
+                "PLAYER_ID": 3,
+                "PLAYER_NAME": "Road Knick",
+                "INGESTED_AT_UTC": "2026-02-10T12:06:00+00:00",
+            },
+            {
+                "GAME_DATE": "2026-02-11",
+                "GAME_ID": "0022500002",
+                "MATCHUP": "BOS @ PHI",
+                "PTS": 15,
+                "SEASON": "2025-26",
+                "PLAYER_ID": 1,
+                "PLAYER_NAME": "Test Scorer",
+                "INGESTED_AT_UTC": "2026-02-11T12:00:00+00:00",
+            },
+        ]
+    )
+
+
+def test_parse_matchup_context_identifies_home_and_away():
+    assert pipeline.parse_matchup_context("BOS vs. NYK") == {
+        "team_abbr": "BOS",
+        "opponent_abbr": "NYK",
+        "home_away": "HOME",
+    }
+    assert pipeline.parse_matchup_context("LAL @ PHX") == {
+        "team_abbr": "LAL",
+        "opponent_abbr": "PHX",
+        "home_away": "AWAY",
+    }
+    assert pipeline.parse_matchup_context("not a matchup") is None
+
+
+def test_derive_game_line_scores_from_game_logs_uses_team_lookup_and_totals():
+    result = pipeline.derive_game_line_scores_from_game_logs(
+        _bootstrap_game_logs_sample()
+    )
+
+    first_game = result[result["GAME_ID"] == "0022500001"].sort_values("TEAM_ABBR")
+    assert first_game["TEAM_ABBR"].tolist() == ["BOS", "NYK"]
+    assert first_game["TEAM_ID"].tolist() == [1610612738, 1610612752]
+    assert first_game["PTS"].tolist() == [50, 40]
+    assert first_game["PTS_QTR1"].tolist() == [0, 0]
+
+
+def test_derive_schedule_from_game_logs_marks_observed_home_away_and_b2b():
+    result = pipeline.derive_schedule_from_game_logs(_bootstrap_game_logs_sample())
+
+    first_game = result[result["GAME_ID"] == "0022500001"].sort_values("TEAM_ABBR")
+    assert first_game[["TEAM_ABBR", "OPPONENT_ABBR", "HOME_AWAY"]].to_dict(
+        "records"
+    ) == [
+        {"TEAM_ABBR": "BOS", "OPPONENT_ABBR": "NYK", "HOME_AWAY": "HOME"},
+        {"TEAM_ABBR": "NYK", "OPPONENT_ABBR": "BOS", "HOME_AWAY": "AWAY"},
+    ]
+    boston_second_game = result[
+        (result["GAME_ID"] == "0022500002") & (result["TEAM_ABBR"] == "BOS")
+    ].iloc[0]
+    assert bool(boston_second_game["IS_BACK_TO_BACK"]) is True
+
+
+def test_derive_player_reference_from_game_logs_uses_latest_team_context():
+    result = pipeline.derive_player_reference_from_game_logs(
+        _bootstrap_game_logs_sample()
+    )
+
+    player = result[result["PLAYER_ID"] == 1].iloc[0]
+    assert player["PLAYER_NAME"] == "Test Scorer"
+    assert player["FIRST_NAME"] == "Test"
+    assert player["LAST_NAME"] == "Scorer"
+    assert player["TEAM_ABBR"] == "BOS"
+    assert player["TEAM_ID"] == 1610612738
+    assert bool(player["ROSTER_STATUS"]) is True
+
+
+def test_should_bootstrap_bronze_table_modes():
+    assert pipeline.should_bootstrap_bronze_table(
+        "auto", raw_game_logs_rows=10, target_rows=None
+    )
+    assert pipeline.should_bootstrap_bronze_table(
+        "auto", raw_game_logs_rows=10, target_rows=0
+    )
+    assert not pipeline.should_bootstrap_bronze_table(
+        "auto", raw_game_logs_rows=10, target_rows=5
+    )
+    assert not pipeline.should_bootstrap_bronze_table(
+        "off", raw_game_logs_rows=10, target_rows=0
+    )
+    assert pipeline.should_bootstrap_bronze_table(
+        "force", raw_game_logs_rows=10, target_rows=5
+    )
+    assert not pipeline.should_bootstrap_bronze_table(
+        "force", raw_game_logs_rows=0, target_rows=0
+    )
+
+
+def test_apply_bootstrap_domain_result_adds_accounting():
+    current = {
+        "domain": "schedule",
+        "rows_loaded": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+    }
+    bootstrap = {
+        "domain": "schedule",
+        "ran": True,
+        "rows_loaded": 4,
+        "rows_inserted": 3,
+        "rows_updated": 1,
+        "rows_unchanged": 0,
+        "dq_results": {"total_rows": 4},
+        "reconciliation": {"inserted": 3},
+    }
+
+    result = pipeline.apply_bootstrap_domain_result(current, bootstrap)
+
+    assert result["rows_loaded"] == 4
+    assert result["rows_inserted"] == 3
+    assert result["rows_updated"] == 1
+    assert result["rows_unchanged"] == 0
+    assert result["bronze_bootstrap"] == bootstrap
+    assert result["bootstrap_dq_results"] == {"total_rows": 4}
 
 
 def test_build_analysis_snapshot_record_is_deterministic():

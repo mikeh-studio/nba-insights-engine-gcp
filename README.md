@@ -149,6 +149,17 @@ BQ_METADATA_DATASET=nba_metadata
 BQ_LOCATION=US
 NBA_MAX_PLAYERS=0
 NBA_REPLAY_DAYS=3
+NBA_API_TIMEOUT_SECONDS=15
+NBA_API_RETRIES=3
+NBA_API_RETRY_BASE_DELAY_SECONDS=1.0
+NBA_API_RETRY_BACKOFF_MULTIPLIER=2.0
+NBA_API_RETRY_MAX_DELAY_SECONDS=8.0
+NBA_BRONZE_BOOTSTRAP_MODE=auto
+AIRFLOW_LIVE_VALIDATE_TIMEOUT_SECONDS=7200
+AIRFLOW_LIVE_VALIDATE_POLL_SECONDS=30
+AIRFLOW_LIVE_VALIDATE_RUN_DBT=true
+AIRFLOW_LIVE_VALIDATE_FAIL_ON_ACTIVE_RUNS=true
+AIRFLOW_LIVE_VALIDATE_EXECUTOR=SequentialExecutor
 NBA_ARCHETYPE_CLUSTERS=6
 NBA_SCHEDULE_LOOKAHEAD_DAYS=7
 DBT_TARGET=dev
@@ -173,6 +184,8 @@ Initialize the local Airflow metadata database:
 make airflow-init
 ```
 
+This migrates the local metadata DB, reserializes DAGs, and lists the registered DAGs.
+
 Create an admin user for the local web UI:
 
 ```bash
@@ -192,11 +205,53 @@ Trigger the pipeline manually:
 make airflow-trigger
 ```
 
+The trigger target runs the same local init/sync path first so `nba_analytics_pipeline`
+is registered in Airflow's metadata DB before creating a DAG run.
+
+Run a bounded scheduler-backed live validation:
+
+```bash
+make airflow-live-validate
+```
+
+This starts a local scheduler, temporarily unpauses `nba_analytics_pipeline` if it was
+paused, triggers one uniquely named manual run, waits for a terminal DAG state, restores
+the previous pause state, and stops the scheduler. It then checks the four bronze contract
+tables and runs the targeted dbt gold contract build. Reports are written under
+`reports/pipeline_triage/`, which is ignored by git. The validation refuses to start if
+existing queued or running DagRuns are present unless
+`AIRFLOW_LIVE_VALIDATE_FAIL_ON_ACTIVE_RUNS=false` or `--allow-existing-active-runs` is
+used. During validation the local scheduler runs with scheduled-run creation disabled so
+the temporary unpause does not create an unrelated scheduled DagRun. The harness also
+generates ignored local wrappers so Airflow task subprocesses use the known-good
+`python -m airflow` entrypoint and an exec-based task runner instead of macOS `fork`.
+
+Bronze bootstrap behavior is controlled by `NBA_BRONZE_BOOTSTRAP_MODE`:
+
+- `auto`: derive missing or empty auxiliary bronze tables from `raw_game_logs`.
+- `off`: disable derived bronze bootstrap.
+- `force`: re-merge derived auxiliary bronze rows even when tables already have rows.
+
+NBA API timeout and retry behavior is controlled by `NBA_API_TIMEOUT_SECONDS`,
+`NBA_API_RETRIES`, `NBA_API_RETRY_BASE_DELAY_SECONDS`,
+`NBA_API_RETRY_BACKOFF_MULTIPLIER`, and `NBA_API_RETRY_MAX_DELAY_SECONDS`.
+Game logs remain the hard-gated source; schedule, line-score, and player-reference
+timeouts soft-fail after retries so the bronze bootstrap path can keep the core
+contract moving when `raw_game_logs` already has rows.
+
+Live validation behavior is controlled by `AIRFLOW_LIVE_VALIDATE_TIMEOUT_SECONDS`,
+`AIRFLOW_LIVE_VALIDATE_POLL_SECONDS`, `AIRFLOW_LIVE_VALIDATE_RUN_DBT`,
+`AIRFLOW_LIVE_VALIDATE_FAIL_ON_ACTIVE_RUNS`, and
+`AIRFLOW_LIVE_VALIDATE_ENABLE_REDSHIFT`. The local executor defaults to
+`AIRFLOW_LIVE_VALIDATE_EXECUTOR=SequentialExecutor`. Core GCP validation disables the
+optional Redshift branch by default; pass `--enable-redshift` to include it.
+
 Useful URLs and commands:
 
 - Airflow UI: `http://localhost:8080`
 - List DAGs: `make airflow-list`
 - Run a DAG parse check: `make airflow-parse`
+- Run scheduler-backed live validation: `make airflow-live-validate`
 
 ## Running the App Locally
 
@@ -241,10 +296,10 @@ Current local validation caveats:
 - `dbt build --target redshift --select path:dbt/models/silver` is the recommended compatibility check for the Redshift secondary warehouse and requires working Redshift credentials plus the `dbt-redshift` adapter.
 - `dbt test` requires a real BigQuery-enabled project and valid GCP auth; it will fail against placeholder projects such as `local-project`.
 - The targeted workbench-model `dbt test --select ...` command has the same BigQuery auth requirement.
-- In the latest local validation run for this branch, `python -m compileall dags app tests`, `PYTHONPATH=. pytest`, `dbt parse`, and `make airflow-parse` all pass.
+- In the latest local validation run for this branch, `python -m compileall dags scripts tests`, `PYTHONPATH=. pytest`, `dbt parse`, `make airflow-parse`, and targeted dbt tests for `dim_game`, `fct_team_game_scores`, `player_fantasy_rankings`, and `stg_schedule_clean` all pass.
 - In the latest live validation run for this branch, the configured BigQuery project `nba-data-485505` is reachable and the minimum core chain builds successfully:
   `dim_player dim_team dim_game fct_player_game_stats fct_team_game_scores fct_player_scoring_contribution player_recent_form player_similarity_feature_input`.
-- Live Airflow orchestration still needs follow-up hardening: the local `make airflow-trigger` path did not find the DAG in `DagModel`, and direct DAG testing hit NBA API timeouts. The warehouse was repaired directly in BigQuery for this validation pass.
+- Live Airflow orchestration still needs a scheduler-backed validation run. Local `make airflow-trigger` now registers the DAG before triggering, and NBA API calls now use bounded timeout/retry settings. The prior warehouse validation was repaired directly in BigQuery.
 
 ## Security Hygiene
 

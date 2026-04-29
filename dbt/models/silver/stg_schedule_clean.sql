@@ -17,7 +17,17 @@ select
     upper(cast(opponent_abbr as {{ varchar_type() }})) as opponent_abbr,
     cast(home_away as {{ varchar_type() }}) as home_away,
     cast(coalesce(is_back_to_back, false) as {{ bool_type() }}) as is_back_to_back,
-    cast(coalesce(game_status, 'scheduled') as {{ varchar_type() }}) as game_status,
+    cast(
+        case
+            when game_status is null or trim(cast(game_status as {{ varchar_type() }})) = '' then 'scheduled'
+            when lower(trim(cast(game_status as {{ varchar_type() }}))) in ('scheduled', 'pre-game', 'tbd') then 'scheduled'
+            when regexp_contains(lower(trim(cast(game_status as {{ varchar_type() }}))), r'^[0-9]{1,2}:[0-9]{2}\s*(am|pm)\s*et$') then 'scheduled'
+            when lower(trim(cast(game_status as {{ varchar_type() }}))) in ('final', 'final/ot') then 'final'
+            when lower(trim(cast(game_status as {{ varchar_type() }}))) like 'final%' then 'final'
+            when lower(trim(cast(game_status as {{ varchar_type() }}))) in ('postponed', 'ppd') then 'postponed'
+            else lower(trim(cast(game_status as {{ varchar_type() }})))
+        end as {{ varchar_type() }}
+    ) as game_status,
     cast(source_updated_at_utc as timestamp) as source_updated_at_utc
 from {{ source('bronze', 'raw_schedule') }}
 where cast(schedule_date as date) between date('2025-07-01') and date('2026-06-30')

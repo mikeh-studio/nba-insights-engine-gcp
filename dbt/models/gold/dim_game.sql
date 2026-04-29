@@ -11,7 +11,7 @@ with team_scores as (
         t.team_id,
         t.team_abbr,
         t.team_pts,
-        s.home_away,
+        coalesce(s.home_away, t.home_away) as home_away,
         t.ingested_at_utc
     from {{ ref('fct_team_game_scores') }} t
     left join {{ ref('stg_schedule_clean') }} s

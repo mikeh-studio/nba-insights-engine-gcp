@@ -168,6 +168,17 @@ The repo currently uses environment variables and Airflow Variables. As the proj
 - `DBT_TARGET`
 - `NBA_SEASON`
 - `NBA_ARCHETYPE_CLUSTERS`
+- `NBA_BRONZE_BOOTSTRAP_MODE`
+- `NBA_API_TIMEOUT_SECONDS`
+- `NBA_API_RETRIES`
+- `NBA_API_RETRY_BASE_DELAY_SECONDS`
+- `NBA_API_RETRY_BACKOFF_MULTIPLIER`
+- `NBA_API_RETRY_MAX_DELAY_SECONDS`
+- `AIRFLOW_LIVE_VALIDATE_TIMEOUT_SECONDS`
+- `AIRFLOW_LIVE_VALIDATE_POLL_SECONDS`
+- `AIRFLOW_LIVE_VALIDATE_RUN_DBT`
+- `AIRFLOW_LIVE_VALIDATE_FAIL_ON_ACTIVE_RUNS`
+- `AIRFLOW_LIVE_VALIDATE_EXECUTOR`
 - replay buffer and watermark settings
 - alerting or notification configuration
 - `ENABLE_REDSHIFT` and Redshift connection settings (see `.env.example`)
@@ -192,7 +203,7 @@ airflow standalone
 Target-state validation commands to prefer once the corresponding pieces exist:
 
 ```bash
-python -m compileall dags app tests
+python -m compileall dags scripts tests
 PYTHONPATH=. pytest
 dbt parse --project-dir . --profiles-dir dbt/profiles
 dbt test --project-dir . --profiles-dir dbt/profiles --target dev
@@ -202,8 +213,12 @@ terraform plan
 Current local caveat:
 
 - `dbt test` still requires a real BigQuery-enabled project and working GCP auth. The profile fallback `local-project` is not sufficient.
-- `make airflow-parse` works against the repo-local `.venv-airflow` path when present.
-- The latest live BigQuery validation on this branch built the minimum core gold chain through `gold.fct_player_scoring_contribution` and `gold.player_similarity_feature_input`. Airflow trigger/bootstrap still needs follow-up because local `make airflow-trigger` did not find the DAG in `DagModel`, and direct DAG testing hit NBA API timeouts.
+- `make airflow-parse` works against the repo-local `.venv-airflow` path when present and now checks that `nba_analytics_pipeline` can be listed.
+- `make airflow-trigger` runs local DB migration and DAG reserialization before triggering to avoid stale `DagModel` state.
+- `make airflow-live-validate` starts a bounded local scheduler process with scheduled-run creation disabled, generated local Airflow wrappers, and an exec-based task runner to avoid macOS fork stalls, temporarily unpauses `nba_analytics_pipeline` if needed, triggers a uniquely named manual run, restores the prior pause state, checks the bronze/gold BigQuery contract, and writes an ignored report under `reports/pipeline_triage/`. It disables optional Redshift tasks by default for core GCP validation; pass `--enable-redshift` to include them.
+- `NBA_BRONZE_BOOTSTRAP_MODE=auto` lets the DAG derive missing or empty auxiliary bronze tables from `bronze.raw_game_logs`; authoritative NBA API line-score/player-reference extraction remains the preferred normal path.
+- NBA API endpoints use configurable bounded timeout/retry settings. Game-log extraction remains hard-gated; schedule, line-score, and player-reference timeouts soft-fail after retries so bootstrap can keep the core bronze contract moving.
+- The latest live BigQuery validation on this branch built the minimum core gold chain through `gold.fct_player_scoring_contribution` and `gold.player_similarity_feature_input`. Use `make airflow-live-validate` for the direct scheduler-backed live rerun.
 
 ## Working Guidance
 
