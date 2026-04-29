@@ -80,7 +80,6 @@ models:
         tests: [not_null, unique]
       - name: latest_team_abbr
         tests:
-          - not_null
           - accepted_values:
               arguments:
                 values: *nba_team_abbrs

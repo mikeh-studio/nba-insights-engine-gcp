@@ -12,14 +12,20 @@ export AIRFLOW__CORE__LOAD_EXAMPLES ?= False
 AIRFLOW_PYTHON := $(firstword $(wildcard $(CURDIR)/.venv-airflow/bin/python3*))
 ifeq ($(AIRFLOW_PYTHON),)
 AIRFLOW_CMD := airflow
+AIRFLOW_LIVE_VALIDATE_PYTHON := python3
 else
 AIRFLOW_CMD := $(AIRFLOW_PYTHON) -m airflow
+AIRFLOW_LIVE_VALIDATE_PYTHON := $(AIRFLOW_PYTHON)
 endif
 
-.PHONY: airflow-init airflow-create-user airflow-webserver airflow-scheduler airflow-trigger airflow-list airflow-parse
+.PHONY: airflow-init airflow-sync airflow-create-user airflow-webserver airflow-scheduler airflow-trigger airflow-list airflow-parse airflow-live-validate
 
 airflow-init:
-	$(AIRFLOW_CMD) db init
+	mkdir -p "$(AIRFLOW_HOME)"
+	$(AIRFLOW_CMD) db migrate
+	$(AIRFLOW_CMD) dags reserialize
+	$(AIRFLOW_CMD) dags list
+	$(AIRFLOW_CMD) tasks list nba_analytics_pipeline
 
 airflow-create-user:
 	$(AIRFLOW_CMD) users create \
@@ -36,11 +42,20 @@ airflow-webserver:
 airflow-scheduler:
 	$(AIRFLOW_CMD) scheduler
 
-airflow-trigger:
+airflow-sync:
+	$(AIRFLOW_CMD) dags reserialize
+	$(AIRFLOW_CMD) dags list
+	$(AIRFLOW_CMD) tasks list nba_analytics_pipeline
+
+airflow-trigger: airflow-init
 	$(AIRFLOW_CMD) dags trigger nba_analytics_pipeline
+
+airflow-live-validate:
+	$(AIRFLOW_LIVE_VALIDATE_PYTHON) scripts/airflow_live_validate.py
 
 airflow-list:
 	$(AIRFLOW_CMD) dags list
 
 airflow-parse:
 	$(AIRFLOW_CMD) dags list-import-errors
+	$(AIRFLOW_CMD) tasks list nba_analytics_pipeline

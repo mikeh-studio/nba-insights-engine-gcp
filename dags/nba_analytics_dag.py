@@ -44,6 +44,34 @@ def get_dataset(dataset_key: str, default_name: str) -> str:
     return get_config(dataset_key, get_config("BQ_DATASET", default_name))
 
 
+def get_int_config(key: str, default: str) -> int:
+    value = get_config(key, default)
+    try:
+        return int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
+
+
+def get_float_config(key: str, default: str) -> float:
+    value = get_config(key, default)
+    try:
+        return float(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be a number, got {value!r}") from exc
+
+
+def get_nba_api_request_config() -> dict:
+    return {
+        "timeout": get_float_config("NBA_API_TIMEOUT_SECONDS", "15"),
+        "retries": get_int_config("NBA_API_RETRIES", "3"),
+        "retry_base_delay": get_float_config("NBA_API_RETRY_BASE_DELAY_SECONDS", "1.0"),
+        "retry_backoff_multiplier": get_float_config(
+            "NBA_API_RETRY_BACKOFF_MULTIPLIER", "2.0"
+        ),
+        "retry_max_delay": get_float_config("NBA_API_RETRY_MAX_DELAY_SECONDS", "8.0"),
+    }
+
+
 def get_dbt_repo_root() -> Path:
     """Resolve the dbt project root in local Airflow-friendly layouts."""
     dag_file = Path(__file__).resolve()
@@ -117,7 +145,11 @@ def nba_analytics_pipeline():
         selected = active if max_players <= 0 else active[:max_players]
         logger.info("Processing %s players for season %s", len(selected), season)
 
-        df = pipeline.get_all_player_game_logs(selected, season=season)
+        df = pipeline.get_all_player_game_logs(
+            selected,
+            season=season,
+            **get_nba_api_request_config(),
+        )
         incremental_df = pipeline.filter_incremental_game_logs(
             df,
             watermark_date=state["watermark_date"],
@@ -192,7 +224,11 @@ def nba_analytics_pipeline():
                 "season": season,
             }
 
-        line_scores = pipeline.get_all_game_line_scores(game_ids, season=season)
+        line_scores = pipeline.get_all_game_line_scores(
+            game_ids,
+            season=season,
+            **get_nba_api_request_config(),
+        )
         if line_scores.empty:
             logger.info("No line score rows returned for candidate game_ids")
             return {
@@ -228,7 +264,10 @@ def nba_analytics_pipeline():
 
         active = pipeline.get_active_players()
         selected = active if max_players <= 0 else active[:max_players]
-        reference_df = pipeline.get_all_player_references(selected)
+        reference_df = pipeline.get_all_player_references(
+            selected,
+            **get_nba_api_request_config(),
+        )
         if reference_df.empty:
             logger.info("No player reference rows returned for active players")
             return {
@@ -261,6 +300,7 @@ def nba_analytics_pipeline():
         schedule_df = pipeline.get_upcoming_schedule(
             season=season,
             horizon_days=horizon_days,
+            **get_nba_api_request_config(),
         )
         if schedule_df.empty:
             logger.info(
@@ -709,8 +749,34 @@ def nba_analytics_pipeline():
         schedule_result: dict,
         line_score_result: dict,
         player_reference_result: dict,
+        bootstrap_result: dict | None = None,
     ) -> dict:
         """Combine per-domain results into a single warehouse build context."""
+        import nba_pipeline as pipeline
+
+        if bootstrap_result:
+            bootstrap_domains = bootstrap_result.get("domains", {})
+            schedule_result = pipeline.apply_bootstrap_domain_result(
+                schedule_result, bootstrap_domains.get("schedule", {})
+            )
+            line_score_result = pipeline.apply_bootstrap_domain_result(
+                line_score_result, bootstrap_domains.get("game_line_scores", {})
+            )
+            player_reference_result = pipeline.apply_bootstrap_domain_result(
+                player_reference_result,
+                bootstrap_domains.get("player_reference", {}),
+            )
+
+        bootstrap_summary = {
+            domain: {
+                "ran": details.get("ran"),
+                "rows_loaded": details.get("rows_loaded", 0),
+                "rows_inserted": details.get("rows_inserted", 0),
+                "rows_updated": details.get("rows_updated", 0),
+                "reason": details.get("reason"),
+            }
+            for domain, details in (bootstrap_result or {}).get("domains", {}).items()
+        }
         all_gcs = [
             value
             for value in [
@@ -756,6 +822,8 @@ def nba_analytics_pipeline():
                 "game_line_scores": line_score_result.get("reconciliation", {}),
                 "player_reference": player_reference_result.get("reconciliation", {}),
             },
+            "bronze_bootstrap": bootstrap_result or {},
+            "bronze_bootstrap_summary": bootstrap_summary,
             "should_build": any(
                 [
                     game_result["rows_loaded"] > 0,
@@ -765,6 +833,43 @@ def nba_analytics_pipeline():
                 ]
             ),
         }
+
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def bootstrap_bronze_contract(
+        game_result: dict,
+        schedule_result: dict,
+        line_score_result: dict,
+        player_reference_result: dict,
+    ) -> dict:
+        """Derive missing auxiliary bronze tables from raw game logs when needed."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        mode = get_config("NBA_BRONZE_BOOTSTRAP_MODE", "auto")
+        client = bq.Client(project=project_id)
+        result = pipeline.run_bronze_contract_bootstrap(
+            client,
+            project_id=project_id,
+            bronze_dataset=bronze_dataset,
+            season=SUPPORTED_SEASON,
+            mode=mode,
+        )
+        logger.info(
+            "Bronze bootstrap result: %s",
+            {
+                domain: {
+                    "ran": details.get("ran"),
+                    "rows_loaded": details.get("rows_loaded"),
+                    "rows_inserted": details.get("rows_inserted"),
+                    "rows_updated": details.get("rows_updated"),
+                    "reason": details.get("reason"),
+                }
+                for domain, details in result.get("domains", {}).items()
+            },
+        )
+        return result
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
     def dbt_build(merge_result: dict) -> dict:
@@ -1068,6 +1173,7 @@ def nba_analytics_pipeline():
                 f"schedule_rows_unchanged={run_result.get('schedule_rows_unchanged', 0)};"
                 f"line_score_rows_unchanged={run_result.get('line_score_rows_unchanged', 0)};"
                 f"player_reference_rows_unchanged={run_result.get('player_reference_rows_unchanged', 0)};"
+                f"bronze_bootstrap={run_result.get('bronze_bootstrap_summary', {})};"
                 f"redshift_status={run_result.get('redshift_status', get_config('ENABLE_REDSHIFT', 'false'))};"
                 f"dq={run_result.get('dq_results', {})};"
                 f"reconciliation={run_result.get('reconciliation', {})}"
@@ -1245,11 +1351,19 @@ def nba_analytics_pipeline():
         combined_result["redshift_status"] = "skipped"
         return combined_result
 
+    bootstrapped_bronze = bootstrap_bronze_contract(
+        merged,
+        merged_schedule,
+        merged_line_scores,
+        merged_player_reference,
+    )
+
     combined = combine_pipeline_results(
         merged,
         merged_schedule,
         merged_line_scores,
         merged_player_reference,
+        bootstrapped_bronze,
     )
 
     # Redshift branch (optional, non-blocking)

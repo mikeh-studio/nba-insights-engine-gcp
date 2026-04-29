@@ -8,11 +8,13 @@ analysis snapshot generation, and idempotent warehouse loads.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
+from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, storage
 from nba_api.stats.endpoints import boxscoresummaryv2
 from nba_api.stats.endpoints import commonplayerinfo
@@ -26,6 +28,54 @@ SOURCE_SYSTEM = "nba_api"
 SUPPORTED_SEASON = "2025-26"
 SUPPORTED_SEASON_START = date(2025, 7, 1)
 SUPPORTED_SEASON_END = date(2026, 6, 30)
+NBA_API_TIMEOUT_SECONDS = 15.0
+NBA_API_RETRIES = 3
+NBA_API_RETRY_BASE_DELAY_SECONDS = 1.0
+NBA_API_RETRY_BACKOFF_MULTIPLIER = 2.0
+NBA_API_RETRY_MAX_DELAY_SECONDS = 8.0
+
+NBA_TEAM_LOOKUP_ROWS: Tuple[Tuple[str, int, str, str], ...] = (
+    ("ATL", 1610612737, "Atlanta", "Hawks"),
+    ("BOS", 1610612738, "Boston", "Celtics"),
+    ("BKN", 1610612751, "Brooklyn", "Nets"),
+    ("CHA", 1610612766, "Charlotte", "Hornets"),
+    ("CHI", 1610612741, "Chicago", "Bulls"),
+    ("CLE", 1610612739, "Cleveland", "Cavaliers"),
+    ("DAL", 1610612742, "Dallas", "Mavericks"),
+    ("DEN", 1610612743, "Denver", "Nuggets"),
+    ("DET", 1610612765, "Detroit", "Pistons"),
+    ("GSW", 1610612744, "Golden State", "Warriors"),
+    ("HOU", 1610612745, "Houston", "Rockets"),
+    ("IND", 1610612754, "Indiana", "Pacers"),
+    ("LAC", 1610612746, "LA", "Clippers"),
+    ("LAL", 1610612747, "Los Angeles", "Lakers"),
+    ("MEM", 1610612763, "Memphis", "Grizzlies"),
+    ("MIA", 1610612748, "Miami", "Heat"),
+    ("MIL", 1610612749, "Milwaukee", "Bucks"),
+    ("MIN", 1610612750, "Minnesota", "Timberwolves"),
+    ("NOP", 1610612740, "New Orleans", "Pelicans"),
+    ("NYK", 1610612752, "New York", "Knicks"),
+    ("OKC", 1610612760, "Oklahoma City", "Thunder"),
+    ("ORL", 1610612753, "Orlando", "Magic"),
+    ("PHI", 1610612755, "Philadelphia", "76ers"),
+    ("PHX", 1610612756, "Phoenix", "Suns"),
+    ("POR", 1610612757, "Portland", "Trail Blazers"),
+    ("SAC", 1610612758, "Sacramento", "Kings"),
+    ("SAS", 1610612759, "San Antonio", "Spurs"),
+    ("TOR", 1610612761, "Toronto", "Raptors"),
+    ("UTA", 1610612762, "Utah", "Jazz"),
+    ("WAS", 1610612764, "Washington", "Wizards"),
+)
+NBA_TEAM_LOOKUP: Tuple[Dict[str, Any], ...] = tuple(
+    {
+        "team_abbr": team_abbr,
+        "team_id": team_id,
+        "team_city_name": team_city_name,
+        "team_nickname": team_nickname,
+    }
+    for team_abbr, team_id, team_city_name, team_nickname in NBA_TEAM_LOOKUP_ROWS
+)
+NBA_TEAM_LOOKUP_BY_ABBR = {team["team_abbr"]: team for team in NBA_TEAM_LOOKUP}
 
 
 def get_season_date_bounds(season: str = SUPPORTED_SEASON) -> Tuple[date, date]:
@@ -272,10 +322,70 @@ def get_active_players() -> list:
     return active
 
 
+def normalize_nba_api_retries(retries: int) -> int:
+    """Keep endpoint retry counts in a valid operational range."""
+    return max(int(retries), 1)
+
+
+def calculate_nba_api_retry_delay(
+    attempt: int,
+    *,
+    base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
+) -> float:
+    """Return bounded exponential sleep seconds after a failed attempt."""
+    safe_attempt = max(int(attempt), 1)
+    safe_base_delay = max(float(base_delay), 0.0)
+    safe_multiplier = max(float(backoff_multiplier), 1.0)
+    safe_max_delay = max(float(max_delay), 0.0)
+    delay = safe_base_delay * (safe_multiplier ** (safe_attempt - 1))
+    return min(delay, safe_max_delay)
+
+
+def _sleep_before_nba_api_retry(
+    *,
+    domain: str,
+    identifier: Any,
+    attempt: int,
+    retries: int,
+    timeout: float,
+    retry_base_delay: float,
+    retry_backoff_multiplier: float,
+    retry_max_delay: float,
+) -> None:
+    sleep_seconds = calculate_nba_api_retry_delay(
+        attempt,
+        base_delay=retry_base_delay,
+        backoff_multiplier=retry_backoff_multiplier,
+        max_delay=retry_max_delay,
+    )
+    logger.warning(
+        "Retrying NBA API %s id=%s attempt=%s/%s timeout=%.1fs in %.1fs",
+        domain,
+        identifier,
+        attempt,
+        retries,
+        timeout,
+        sleep_seconds,
+    )
+    time.sleep(sleep_seconds)
+
+
 def get_player_game_log(
-    player_id: int, season: str = SUPPORTED_SEASON, retries: int = 3, delay: float = 0.8
+    player_id: int,
+    season: str = SUPPORTED_SEASON,
+    retries: int = NBA_API_RETRIES,
+    delay: Optional[float] = None,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Get normalized game logs for a single player with retry logic."""
+    retries = normalize_nba_api_retries(retries)
+    if delay is not None:
+        retry_base_delay = delay
     cols = [
         "Game_ID",
         "GAME_DATE",
@@ -305,7 +415,11 @@ def get_player_game_log(
 
     for attempt in range(1, retries + 1):
         try:
-            gamelog = playergamelog.PlayerGameLog(player_id=player_id, season=season)
+            gamelog = playergamelog.PlayerGameLog(
+                player_id=player_id,
+                season=season,
+                timeout=timeout,
+            )
             df = gamelog.get_data_frames()[0]
 
             missing_cols = [c for c in cols if c not in df.columns]
@@ -348,24 +462,35 @@ def get_player_game_log(
         except Exception:
             if attempt == retries:
                 logger.exception(
-                    "Failed player_id=%s after %s attempts", player_id, retries
+                    "Failed NBA API player game log player_id=%s after %s attempts timeout=%.1fs",
+                    player_id,
+                    retries,
+                    timeout,
                 )
                 return pd.DataFrame()
-            sleep_seconds = delay * attempt
-            logger.warning(
-                "Retrying player_id=%s attempt=%s/%s in %.1fs",
-                player_id,
-                attempt,
-                retries,
-                sleep_seconds,
+            _sleep_before_nba_api_retry(
+                domain="player_game_log",
+                identifier=player_id,
+                attempt=attempt,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
             )
-            time.sleep(sleep_seconds)
 
     return pd.DataFrame()
 
 
 def get_all_player_game_logs(
-    player_list: Iterable[dict], season: str = SUPPORTED_SEASON, delay: float = 0.6
+    player_list: Iterable[dict],
+    season: str = SUPPORTED_SEASON,
+    delay: float = 0.6,
+    retries: int = NBA_API_RETRIES,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Fetch game logs for multiple players with rate limiting."""
     all_logs = []
@@ -376,7 +501,15 @@ def get_all_player_game_logs(
         player_name = player["full_name"]
         logger.info("Fetching %s/%s: %s", i, len(player_list), player_name)
 
-        games = get_player_game_log(player_id, season=season)
+        games = get_player_game_log(
+            player_id,
+            season=season,
+            retries=retries,
+            timeout=timeout,
+            retry_base_delay=retry_base_delay,
+            retry_backoff_multiplier=retry_backoff_multiplier,
+            retry_max_delay=retry_max_delay,
+        )
         if not games.empty:
             games["PLAYER_ID"] = player_id
             games["PLAYER_NAME"] = player_name
@@ -432,10 +565,17 @@ def get_game_line_scores(
     game_id: str,
     *,
     season: str = SUPPORTED_SEASON,
-    retries: int = 3,
-    delay: float = 0.8,
+    retries: int = NBA_API_RETRIES,
+    delay: Optional[float] = None,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Get normalized team line scores for a single game."""
+    retries = normalize_nba_api_retries(retries)
+    if delay is not None:
+        retry_base_delay = delay
     line_score_fields = [
         "GAME_DATE_EST",
         "GAME_ID",
@@ -467,8 +607,11 @@ def get_game_line_scores(
 
     for attempt in range(1, retries + 1):
         try:
-            summary = boxscoresummaryv2.BoxScoreSummaryV2(game_id=game_id)
-            available = summary.get_available_data()
+            summary = boxscoresummaryv2.BoxScoreSummaryV2(
+                game_id=game_id,
+                timeout=timeout,
+            )
+            available = list(summary.get_available_data())
             if "LineScore" not in available:
                 return empty.copy()
             line_score = summary.get_data_frames()[available.index("LineScore")].copy()
@@ -499,18 +642,22 @@ def get_game_line_scores(
         except Exception:
             if attempt == retries:
                 logger.exception(
-                    "Failed game_id=%s after %s attempts", game_id, retries
+                    "Failed NBA API line score game_id=%s after %s attempts timeout=%.1fs",
+                    game_id,
+                    retries,
+                    timeout,
                 )
                 return empty.copy()
-            sleep_seconds = delay * attempt
-            logger.warning(
-                "Retrying game_id=%s attempt=%s/%s in %.1fs",
-                game_id,
-                attempt,
-                retries,
-                sleep_seconds,
+            _sleep_before_nba_api_retry(
+                domain="game_line_scores",
+                identifier=game_id,
+                attempt=attempt,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
             )
-            time.sleep(sleep_seconds)
 
     return empty.copy()
 
@@ -520,6 +667,11 @@ def get_all_game_line_scores(
     *,
     season: str = SUPPORTED_SEASON,
     delay: float = 0.4,
+    retries: int = NBA_API_RETRIES,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Fetch team line scores for many games with rate limiting."""
     seen: set[str] = set()
@@ -536,7 +688,15 @@ def get_all_game_line_scores(
     all_scores = []
     for idx, game_id in enumerate(normalized_ids, start=1):
         logger.info("Fetching line score %s/%s: %s", idx, len(normalized_ids), game_id)
-        line_scores = get_game_line_scores(game_id, season=season)
+        line_scores = get_game_line_scores(
+            game_id,
+            season=season,
+            retries=retries,
+            timeout=timeout,
+            retry_base_delay=retry_base_delay,
+            retry_backoff_multiplier=retry_backoff_multiplier,
+            retry_max_delay=retry_max_delay,
+        )
         if not line_scores.empty:
             all_scores.append(line_scores)
         time.sleep(delay)
@@ -557,10 +717,17 @@ def get_all_game_line_scores(
 def get_player_reference(
     player_id: int,
     *,
-    retries: int = 3,
-    delay: float = 0.8,
+    retries: int = NBA_API_RETRIES,
+    delay: Optional[float] = None,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Get normalized player reference attributes for a single player."""
+    retries = normalize_nba_api_retries(retries)
+    if delay is not None:
+        retry_base_delay = delay
     expected_cols = [
         "PERSON_ID",
         "FIRST_NAME",
@@ -594,8 +761,11 @@ def get_player_reference(
 
     for attempt in range(1, retries + 1):
         try:
-            info = commonplayerinfo.CommonPlayerInfo(player_id=player_id)
-            available = info.get_available_data()
+            info = commonplayerinfo.CommonPlayerInfo(
+                player_id=player_id,
+                timeout=timeout,
+            )
+            available = list(info.get_available_data())
             if "CommonPlayerInfo" not in available:
                 return empty.copy()
             profile = info.get_data_frames()[available.index("CommonPlayerInfo")].copy()
@@ -639,20 +809,22 @@ def get_player_reference(
         except Exception:
             if attempt == retries:
                 logger.exception(
-                    "Failed player reference player_id=%s after %s attempts",
+                    "Failed NBA API player reference player_id=%s after %s attempts timeout=%.1fs",
                     player_id,
                     retries,
+                    timeout,
                 )
                 return empty.copy()
-            sleep_seconds = delay * attempt
-            logger.warning(
-                "Retrying player reference player_id=%s attempt=%s/%s in %.1fs",
-                player_id,
-                attempt,
-                retries,
-                sleep_seconds,
+            _sleep_before_nba_api_retry(
+                domain="player_reference",
+                identifier=player_id,
+                attempt=attempt,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
             )
-            time.sleep(sleep_seconds)
 
     return empty.copy()
 
@@ -661,6 +833,11 @@ def get_all_player_references(
     player_list: Iterable[dict],
     *,
     delay: float = 0.4,
+    retries: int = NBA_API_RETRIES,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Fetch player reference data for many players with rate limiting."""
     all_profiles = []
@@ -672,7 +849,14 @@ def get_all_player_references(
         logger.info(
             "Fetching player reference %s/%s: %s", idx, len(player_list), player_name
         )
-        profile = get_player_reference(player_id)
+        profile = get_player_reference(
+            player_id,
+            retries=retries,
+            timeout=timeout,
+            retry_base_delay=retry_base_delay,
+            retry_backoff_multiplier=retry_backoff_multiplier,
+            retry_max_delay=retry_max_delay,
+        )
         if not profile.empty:
             all_profiles.append(profile)
         time.sleep(delay)
@@ -802,6 +986,801 @@ def get_player_reference_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("DRAFT_NUMBER", "STRING"),
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
     ]
+
+
+def _empty_dataframe_for_schema(schema: List[bigquery.SchemaField]) -> pd.DataFrame:
+    return pd.DataFrame(columns=[field.name for field in schema])
+
+
+def parse_matchup_context(matchup: Any) -> Optional[Dict[str, str]]:
+    """Parse NBA API matchup strings such as 'BOS vs. NYK' or 'LAL @ PHX'."""
+    if not isinstance(matchup, str):
+        return None
+    match = re.match(
+        r"^\s*([A-Z]{2,3})\s+(VS\.|@)\s+([A-Z]{2,3})\s*$",
+        matchup.strip().upper(),
+    )
+    if not match:
+        return None
+    team_abbr, marker, opponent_abbr = match.groups()
+    return {
+        "team_abbr": team_abbr,
+        "opponent_abbr": opponent_abbr,
+        "home_away": "HOME" if marker == "VS." else "AWAY",
+    }
+
+
+def _coerce_ingested_timestamp(value: Any) -> pd.Timestamp:
+    parsed = pd.to_datetime(value, errors="coerce", utc=True)
+    if pd.isna(parsed):
+        return pd.Timestamp.now(tz="UTC")
+    return parsed
+
+
+def _normalize_game_log_columns(game_logs: pd.DataFrame) -> pd.DataFrame:
+    working = game_logs.copy()
+    working.columns = [str(column).upper() for column in working.columns]
+    return working
+
+
+def derive_game_line_scores_from_game_logs(
+    game_logs: pd.DataFrame,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> pd.DataFrame:
+    """Derive minimum team line-score rows from raw game logs."""
+    if game_logs.empty:
+        return _empty_dataframe_for_schema(get_game_line_scores_schema())
+
+    working = _normalize_game_log_columns(game_logs)
+    required = {"GAME_DATE", "GAME_ID", "MATCHUP", "PTS"}
+    if not required.issubset(set(working.columns)):
+        return _empty_dataframe_for_schema(get_game_line_scores_schema())
+
+    totals: Dict[Tuple[date, str, str, str], Dict[str, Any]] = {}
+    for row in working.to_dict("records"):
+        row_season = str(row.get("SEASON") or season)
+        if row_season != season:
+            continue
+        context = parse_matchup_context(row.get("MATCHUP"))
+        game_date = coerce_to_date(row.get("GAME_DATE"))
+        game_id = str(row.get("GAME_ID") or "").strip()
+        if not context or game_date is None or not game_id:
+            continue
+        team = NBA_TEAM_LOOKUP_BY_ABBR.get(context["team_abbr"])
+        if not team:
+            continue
+        pts = pd.to_numeric(row.get("PTS"), errors="coerce")
+        key = (game_date, game_id, row_season, context["team_abbr"])
+        if key not in totals:
+            totals[key] = {
+                "GAME_DATE": game_date,
+                "GAME_ID": game_id,
+                "SEASON": row_season,
+                "TEAM_ID": team["team_id"],
+                "TEAM_ABBR": team["team_abbr"],
+                "TEAM_CITY_NAME": team["team_city_name"],
+                "TEAM_NICKNAME": team["team_nickname"],
+                "TEAM_WINS_LOSSES": None,
+                "PTS_QTR1": 0,
+                "PTS_QTR2": 0,
+                "PTS_QTR3": 0,
+                "PTS_QTR4": 0,
+                "PTS_OT1": 0,
+                "PTS_OT2": 0,
+                "PTS_OT3": 0,
+                "PTS_OT4": 0,
+                "PTS_OT5": 0,
+                "PTS_OT6": 0,
+                "PTS_OT7": 0,
+                "PTS_OT8": 0,
+                "PTS_OT9": 0,
+                "PTS_OT10": 0,
+                "PTS": 0,
+                "INGESTED_AT_UTC": _coerce_ingested_timestamp(
+                    row.get("INGESTED_AT_UTC")
+                ),
+            }
+        if not pd.isna(pts):
+            totals[key]["PTS"] += int(pts)
+        totals[key]["INGESTED_AT_UTC"] = max(
+            totals[key]["INGESTED_AT_UTC"],
+            _coerce_ingested_timestamp(row.get("INGESTED_AT_UTC")),
+        )
+
+    if not totals:
+        return _empty_dataframe_for_schema(get_game_line_scores_schema())
+
+    columns = [field.name for field in get_game_line_scores_schema()]
+    result = pd.DataFrame(totals.values())
+    result = result.sort_values(["GAME_DATE", "GAME_ID", "TEAM_ID"]).reset_index(
+        drop=True
+    )
+    return result[columns]
+
+
+def derive_schedule_from_game_logs(
+    game_logs: pd.DataFrame,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> pd.DataFrame:
+    """Derive observed team schedule rows from raw game logs."""
+    if game_logs.empty:
+        return _empty_dataframe_for_schema(get_schedule_schema())
+
+    working = _normalize_game_log_columns(game_logs)
+    required = {"GAME_DATE", "GAME_ID", "MATCHUP"}
+    if not required.issubset(set(working.columns)):
+        return _empty_dataframe_for_schema(get_schedule_schema())
+
+    by_team_game: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for row in working.to_dict("records"):
+        row_season = str(row.get("SEASON") or season)
+        if row_season != season:
+            continue
+        context = parse_matchup_context(row.get("MATCHUP"))
+        game_date = coerce_to_date(row.get("GAME_DATE"))
+        game_id = str(row.get("GAME_ID") or "").strip()
+        if not context or game_date is None or not game_id:
+            continue
+        if context["team_abbr"] not in NBA_TEAM_LOOKUP_BY_ABBR:
+            continue
+        key = (game_id, context["team_abbr"])
+        ingested_at = _coerce_ingested_timestamp(row.get("INGESTED_AT_UTC"))
+        if key not in by_team_game:
+            by_team_game[key] = {
+                "SCHEDULE_DATE": game_date,
+                "GAME_ID": game_id,
+                "SEASON": row_season,
+                "TEAM_ABBR": context["team_abbr"],
+                "OPPONENT_ABBR": context["opponent_abbr"],
+                "HOME_AWAY": context["home_away"],
+                "IS_BACK_TO_BACK": False,
+                "GAME_STATUS": "BOOTSTRAPPED_FROM_GAME_LOGS",
+                "SOURCE_UPDATED_AT_UTC": ingested_at,
+                "INGESTED_AT_UTC": ingested_at,
+            }
+            continue
+        by_team_game[key]["SOURCE_UPDATED_AT_UTC"] = max(
+            by_team_game[key]["SOURCE_UPDATED_AT_UTC"], ingested_at
+        )
+        by_team_game[key]["INGESTED_AT_UTC"] = max(
+            by_team_game[key]["INGESTED_AT_UTC"], ingested_at
+        )
+
+    if not by_team_game:
+        return _empty_dataframe_for_schema(get_schedule_schema())
+
+    columns = [field.name for field in get_schedule_schema()]
+    result = pd.DataFrame(by_team_game.values())
+    result = result.sort_values(["TEAM_ABBR", "SCHEDULE_DATE", "GAME_ID"]).reset_index(
+        drop=True
+    )
+    schedule_dates = pd.to_datetime(result["SCHEDULE_DATE"], errors="coerce")
+    previous_dates = schedule_dates.groupby(result["TEAM_ABBR"]).shift(1)
+    result["IS_BACK_TO_BACK"] = previous_dates.notna() & (
+        (schedule_dates - previous_dates).dt.days == 1
+    )
+    result = result.sort_values(["SCHEDULE_DATE", "GAME_ID", "TEAM_ABBR"]).reset_index(
+        drop=True
+    )
+    return result[columns]
+
+
+def _split_player_name(player_name: str) -> Tuple[Optional[str], Optional[str]]:
+    parts = player_name.strip().split(maxsplit=1)
+    if not parts:
+        return None, None
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], parts[1]
+
+
+def _player_slug(player_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", player_name.lower()).strip("-")
+    return slug
+
+
+def derive_player_reference_from_game_logs(
+    game_logs: pd.DataFrame,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> pd.DataFrame:
+    """Derive minimum player reference rows from raw game logs."""
+    if game_logs.empty:
+        return _empty_dataframe_for_schema(get_player_reference_schema())
+
+    working = _normalize_game_log_columns(game_logs)
+    required = {"PLAYER_ID", "PLAYER_NAME", "GAME_DATE", "MATCHUP"}
+    if not required.issubset(set(working.columns)):
+        return _empty_dataframe_for_schema(get_player_reference_schema())
+
+    latest_by_player: Dict[int, Dict[str, Any]] = {}
+    for row in working.to_dict("records"):
+        row_season = str(row.get("SEASON") or season)
+        if row_season != season:
+            continue
+        context = parse_matchup_context(row.get("MATCHUP"))
+        player_id = pd.to_numeric(row.get("PLAYER_ID"), errors="coerce")
+        player_name = str(row.get("PLAYER_NAME") or "").strip()
+        game_date = coerce_to_date(row.get("GAME_DATE"))
+        if (
+            not context
+            or pd.isna(player_id)
+            or not player_name
+            or game_date is None
+            or context["team_abbr"] not in NBA_TEAM_LOOKUP_BY_ABBR
+        ):
+            continue
+        player_key = int(player_id)
+        ingested_at = _coerce_ingested_timestamp(row.get("INGESTED_AT_UTC"))
+        candidate_sort = (game_date, ingested_at)
+        current = latest_by_player.get(player_key)
+        if current and current["_sort"] >= candidate_sort:
+            continue
+        latest_by_player[player_key] = {
+            "player_id": player_key,
+            "player_name": player_name,
+            "team_abbr": context["team_abbr"],
+            "ingested_at_utc": ingested_at,
+            "_sort": candidate_sort,
+        }
+
+    if not latest_by_player:
+        return _empty_dataframe_for_schema(get_player_reference_schema())
+
+    records = []
+    for player in latest_by_player.values():
+        team = NBA_TEAM_LOOKUP_BY_ABBR[player["team_abbr"]]
+        first_name, last_name = _split_player_name(player["player_name"])
+        team_name = f"{team['team_city_name']} {team['team_nickname']}"
+        records.append(
+            {
+                "PLAYER_ID": player["player_id"],
+                "FIRST_NAME": first_name,
+                "LAST_NAME": last_name,
+                "PLAYER_NAME": player["player_name"],
+                "PLAYER_SLUG": _player_slug(player["player_name"]),
+                "BIRTHDATE": None,
+                "SCHOOL": None,
+                "COUNTRY": None,
+                "LAST_AFFILIATION": None,
+                "HEIGHT": None,
+                "WEIGHT": None,
+                "SEASON_EXP": None,
+                "JERSEY": None,
+                "POSITION": None,
+                "ROSTER_STATUS": True,
+                "TEAM_ID": team["team_id"],
+                "TEAM_NAME": team_name,
+                "TEAM_ABBR": team["team_abbr"],
+                "TEAM_CODE": re.sub(r"[^a-z0-9]+", "", team["team_nickname"].lower()),
+                "TEAM_CITY": team["team_city_name"],
+                "FROM_YEAR": None,
+                "TO_YEAR": None,
+                "DRAFT_YEAR": None,
+                "DRAFT_ROUND": None,
+                "DRAFT_NUMBER": None,
+                "INGESTED_AT_UTC": player["ingested_at_utc"],
+            }
+        )
+
+    columns = [field.name for field in get_player_reference_schema()]
+    result = pd.DataFrame(records).sort_values(["PLAYER_ID"]).reset_index(drop=True)
+    return result[columns]
+
+
+def normalize_bronze_bootstrap_mode(mode: Optional[str]) -> str:
+    """Normalize and validate the bronze bootstrap mode."""
+    normalized = (mode or "auto").strip().lower()
+    if normalized not in {"auto", "off", "force"}:
+        raise ValueError("NBA_BRONZE_BOOTSTRAP_MODE must be one of: auto, off, force")
+    return normalized
+
+
+def should_bootstrap_bronze_table(
+    mode: Optional[str],
+    *,
+    raw_game_logs_rows: Optional[int],
+    target_rows: Optional[int],
+) -> bool:
+    """Return whether a derived bronze table should be bootstrapped."""
+    normalized = normalize_bronze_bootstrap_mode(mode)
+    if normalized == "off":
+        return False
+    if not raw_game_logs_rows:
+        return False
+    if normalized == "force":
+        return True
+    return target_rows in (None, 0)
+
+
+def get_table_row_count(
+    bq_client: bigquery.Client,
+    table_id: str,
+) -> Optional[int]:
+    """Return a BigQuery table row count, or None when the table is absent."""
+    try:
+        row = (
+            bq_client.query(f"SELECT COUNT(*) AS c FROM `{table_id}`")
+            .to_dataframe()
+            .iloc[0]
+        )
+    except NotFound:
+        return None
+    return int(row["c"])
+
+
+def _sql_literal(value: Any) -> str:
+    return str(value).replace("'", "''")
+
+
+def _team_lookup_sql() -> str:
+    return "\nUNION ALL\n".join(
+        (
+            f"SELECT '{_sql_literal(team['team_abbr'])}' AS team_abbr, "
+            f"{int(team['team_id'])} AS team_id, "
+            f"'{_sql_literal(team['team_city_name'])}' AS team_city_name, "
+            f"'{_sql_literal(team['team_nickname'])}' AS team_nickname"
+        )
+        for team in NBA_TEAM_LOOKUP
+    )
+
+
+def _count_query_rows(
+    bq_client: bigquery.Client,
+    table_id: str,
+) -> int:
+    count = get_table_row_count(bq_client, table_id)
+    return int(count or 0)
+
+
+def create_bronze_bootstrap_line_scores_staging(
+    bq_client: bigquery.Client,
+    *,
+    raw_game_logs_table: str,
+    staging_table: str,
+    season: str = SUPPORTED_SEASON,
+) -> int:
+    """Create staging line scores derived from raw game logs."""
+    query = f"""
+    CREATE OR REPLACE TABLE `{staging_table}` AS
+    WITH team_lookup AS (
+      {_team_lookup_sql()}
+    ),
+    parsed AS (
+      SELECT
+        DATE(game_date) AS game_date,
+        NULLIF(TRIM(CAST(game_id AS STRING)), '') AS game_id,
+        CAST(season AS STRING) AS season,
+        UPPER(REGEXP_EXTRACT(CAST(matchup AS STRING), r'^([A-Z]{{2,3}})')) AS team_abbr,
+        SAFE_CAST(pts AS INT64) AS pts,
+        CAST(ingested_at_utc AS TIMESTAMP) AS ingested_at_utc
+      FROM `{raw_game_logs_table}`
+      WHERE CAST(season AS STRING) = @season
+        AND game_date IS NOT NULL
+        AND matchup IS NOT NULL
+    ),
+    team_totals AS (
+      SELECT
+        game_date,
+        game_id,
+        season,
+        team_abbr,
+        SUM(COALESCE(pts, 0)) AS pts,
+        MAX(ingested_at_utc) AS source_updated_at_utc
+      FROM parsed
+      WHERE game_id IS NOT NULL
+        AND team_abbr IS NOT NULL
+      GROUP BY 1, 2, 3, 4
+    )
+    SELECT
+      t.game_date AS game_date,
+      t.game_id AS game_id,
+      t.season AS season,
+      l.team_id AS team_id,
+      t.team_abbr AS team_abbr,
+      l.team_city_name AS team_city_name,
+      l.team_nickname AS team_nickname,
+      CAST(NULL AS STRING) AS team_wins_losses,
+      0 AS pts_qtr1,
+      0 AS pts_qtr2,
+      0 AS pts_qtr3,
+      0 AS pts_qtr4,
+      0 AS pts_ot1,
+      0 AS pts_ot2,
+      0 AS pts_ot3,
+      0 AS pts_ot4,
+      0 AS pts_ot5,
+      0 AS pts_ot6,
+      0 AS pts_ot7,
+      0 AS pts_ot8,
+      0 AS pts_ot9,
+      0 AS pts_ot10,
+      CAST(t.pts AS INT64) AS pts,
+      COALESCE(t.source_updated_at_utc, CURRENT_TIMESTAMP()) AS ingested_at_utc
+    FROM team_totals t
+    INNER JOIN team_lookup l
+      ON t.team_abbr = l.team_abbr
+    """
+    bq_client.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("season", "STRING", season),
+            ]
+        ),
+    ).result()
+    return _count_query_rows(bq_client, staging_table)
+
+
+def create_bronze_bootstrap_schedule_staging(
+    bq_client: bigquery.Client,
+    *,
+    raw_game_logs_table: str,
+    staging_table: str,
+    season: str = SUPPORTED_SEASON,
+) -> int:
+    """Create staging schedule rows derived from raw game logs."""
+    query = f"""
+    CREATE OR REPLACE TABLE `{staging_table}` AS
+    WITH parsed AS (
+      SELECT
+        DATE(game_date) AS schedule_date,
+        NULLIF(TRIM(CAST(game_id AS STRING)), '') AS game_id,
+        CAST(season AS STRING) AS season,
+        UPPER(REGEXP_EXTRACT(CAST(matchup AS STRING), r'^([A-Z]{{2,3}})')) AS team_abbr,
+        UPPER(REGEXP_EXTRACT(CAST(matchup AS STRING), r'([A-Z]{{2,3}})$')) AS opponent_abbr,
+        CASE
+          WHEN REGEXP_CONTAINS(CAST(matchup AS STRING), r'\\s+vs\\.\\s+') THEN 'HOME'
+          WHEN REGEXP_CONTAINS(CAST(matchup AS STRING), r'\\s+@\\s+') THEN 'AWAY'
+          ELSE NULL
+        END AS home_away,
+        CAST(ingested_at_utc AS TIMESTAMP) AS ingested_at_utc
+      FROM `{raw_game_logs_table}`
+      WHERE CAST(season AS STRING) = @season
+        AND game_date IS NOT NULL
+        AND matchup IS NOT NULL
+    ),
+    team_games AS (
+      SELECT
+        schedule_date,
+        game_id,
+        season,
+        team_abbr,
+        opponent_abbr,
+        home_away,
+        MAX(ingested_at_utc) AS source_updated_at_utc
+      FROM parsed
+      WHERE game_id IS NOT NULL
+        AND team_abbr IS NOT NULL
+        AND opponent_abbr IS NOT NULL
+        AND home_away IS NOT NULL
+      GROUP BY 1, 2, 3, 4, 5, 6
+    ),
+    with_previous AS (
+      SELECT
+        *,
+        LAG(schedule_date) OVER (
+          PARTITION BY team_abbr
+          ORDER BY schedule_date, game_id
+        ) AS previous_schedule_date
+      FROM team_games
+    )
+    SELECT
+      schedule_date,
+      game_id,
+      season,
+      team_abbr,
+      opponent_abbr,
+      home_away,
+      previous_schedule_date IS NOT NULL
+        AND DATE_DIFF(schedule_date, previous_schedule_date, DAY) = 1
+        AS is_back_to_back,
+      'BOOTSTRAPPED_FROM_GAME_LOGS' AS game_status,
+      COALESCE(source_updated_at_utc, CURRENT_TIMESTAMP()) AS source_updated_at_utc,
+      CURRENT_TIMESTAMP() AS ingested_at_utc
+    FROM with_previous
+    """
+    bq_client.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("season", "STRING", season),
+            ]
+        ),
+    ).result()
+    return _count_query_rows(bq_client, staging_table)
+
+
+def create_bronze_bootstrap_player_reference_staging(
+    bq_client: bigquery.Client,
+    *,
+    raw_game_logs_table: str,
+    staging_table: str,
+    season: str = SUPPORTED_SEASON,
+) -> int:
+    """Create staging player-reference rows derived from raw game logs."""
+    query = f"""
+    CREATE OR REPLACE TABLE `{staging_table}` AS
+    WITH team_lookup AS (
+      {_team_lookup_sql()}
+    ),
+    parsed AS (
+      SELECT
+        SAFE_CAST(player_id AS INT64) AS player_id,
+        NULLIF(TRIM(CAST(player_name AS STRING)), '') AS player_name,
+        UPPER(REGEXP_EXTRACT(CAST(matchup AS STRING), r'^([A-Z]{{2,3}})')) AS team_abbr,
+        DATE(game_date) AS game_date,
+        CAST(ingested_at_utc AS TIMESTAMP) AS ingested_at_utc
+      FROM `{raw_game_logs_table}`
+      WHERE CAST(season AS STRING) = @season
+        AND player_id IS NOT NULL
+        AND player_name IS NOT NULL
+        AND game_date IS NOT NULL
+        AND matchup IS NOT NULL
+    ),
+    latest AS (
+      SELECT
+        ARRAY_AGG(
+          STRUCT(player_id, player_name, team_abbr, game_date, ingested_at_utc)
+          ORDER BY game_date DESC, ingested_at_utc DESC
+          LIMIT 1
+        )[OFFSET(0)] AS row
+      FROM parsed
+      WHERE player_id IS NOT NULL
+        AND player_name IS NOT NULL
+        AND team_abbr IS NOT NULL
+      GROUP BY player_id
+    )
+    SELECT
+      row.player_id AS player_id,
+      CAST(NULL AS STRING) AS first_name,
+      CAST(NULL AS STRING) AS last_name,
+      row.player_name AS player_name,
+      REGEXP_REPLACE(
+        REGEXP_REPLACE(LOWER(row.player_name), r'[^a-z0-9]+', '-'),
+        r'^-|-$',
+        ''
+      ) AS player_slug,
+      CAST(NULL AS DATE) AS birthdate,
+      CAST(NULL AS STRING) AS school,
+      CAST(NULL AS STRING) AS country,
+      CAST(NULL AS STRING) AS last_affiliation,
+      CAST(NULL AS STRING) AS height,
+      CAST(NULL AS INT64) AS weight,
+      CAST(NULL AS INT64) AS season_exp,
+      CAST(NULL AS STRING) AS jersey,
+      CAST(NULL AS STRING) AS position,
+      TRUE AS roster_status,
+      l.team_id AS team_id,
+      CONCAT(l.team_city_name, ' ', l.team_nickname) AS team_name,
+      row.team_abbr AS team_abbr,
+      REGEXP_REPLACE(LOWER(l.team_nickname), r'[^a-z0-9]+', '') AS team_code,
+      l.team_city_name AS team_city,
+      CAST(NULL AS INT64) AS from_year,
+      CAST(NULL AS INT64) AS to_year,
+      CAST(NULL AS STRING) AS draft_year,
+      CAST(NULL AS STRING) AS draft_round,
+      CAST(NULL AS STRING) AS draft_number,
+      COALESCE(row.ingested_at_utc, CURRENT_TIMESTAMP()) AS ingested_at_utc
+    FROM latest
+    INNER JOIN team_lookup l
+      ON row.team_abbr = l.team_abbr
+    """
+    bq_client.query(
+        query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("season", "STRING", season),
+            ]
+        ),
+    ).result()
+    return _count_query_rows(bq_client, staging_table)
+
+
+def _skipped_bootstrap_domain(
+    *,
+    domain: str,
+    raw_table: str,
+    target_rows: Optional[int],
+    raw_game_logs_rows: Optional[int],
+    mode: str,
+    reason: str,
+) -> Dict[str, Any]:
+    return {
+        "domain": domain,
+        "raw_table": raw_table,
+        "mode": mode,
+        "ran": False,
+        "reason": reason,
+        "target_rows_before": target_rows,
+        "raw_game_logs_rows": raw_game_logs_rows,
+        "rows_loaded": 0,
+        "rows_inserted": 0,
+        "rows_updated": 0,
+        "rows_unchanged": 0,
+    }
+
+
+def _bootstrap_domain(
+    *,
+    bq_client: bigquery.Client,
+    domain: str,
+    raw_game_logs_table: str,
+    raw_table: str,
+    staging_table: str,
+    create_staging,
+    run_dq,
+    merge_table,
+    season: str,
+    mode: str,
+    raw_game_logs_rows: Optional[int],
+) -> Dict[str, Any]:
+    target_rows = get_table_row_count(bq_client, raw_table)
+    if not should_bootstrap_bronze_table(
+        mode, raw_game_logs_rows=raw_game_logs_rows, target_rows=target_rows
+    ):
+        return _skipped_bootstrap_domain(
+            domain=domain,
+            raw_table=raw_table,
+            target_rows=target_rows,
+            raw_game_logs_rows=raw_game_logs_rows,
+            mode=mode,
+            reason="bootstrap not required",
+        )
+
+    rows_loaded = create_staging(
+        bq_client,
+        raw_game_logs_table=raw_game_logs_table,
+        staging_table=staging_table,
+        season=season,
+    )
+    if rows_loaded == 0:
+        return _skipped_bootstrap_domain(
+            domain=domain,
+            raw_table=raw_table,
+            target_rows=target_rows,
+            raw_game_logs_rows=raw_game_logs_rows,
+            mode=mode,
+            reason="bootstrap staging produced zero rows",
+        )
+
+    dq_results = run_dq(bq_client, staging_table)
+    merge_result = merge_table(bq_client, staging_table, raw_table)
+    reconciliation = validate_merge_reconciliation(
+        domain=f"{domain}_bootstrap",
+        rows_loaded=rows_loaded,
+        pre_count=merge_result["pre_count"],
+        post_count=merge_result["post_count"],
+        inserted=merge_result["inserted"],
+        updated=merge_result["updated"],
+    )
+    return {
+        "domain": domain,
+        "raw_table": raw_table,
+        "staging_table": staging_table,
+        "mode": mode,
+        "ran": True,
+        "target_rows_before": target_rows,
+        "target_rows_after": merge_result["post_count"],
+        "raw_game_logs_rows": raw_game_logs_rows,
+        "rows_loaded": rows_loaded,
+        "rows_inserted": merge_result["inserted"],
+        "rows_updated": merge_result["updated"],
+        "rows_unchanged": reconciliation["unchanged"],
+        "dq_results": dq_results,
+        "reconciliation": reconciliation,
+    }
+
+
+def run_bronze_contract_bootstrap(
+    bq_client: bigquery.Client,
+    *,
+    project_id: str,
+    bronze_dataset: str,
+    season: str = SUPPORTED_SEASON,
+    mode: Optional[str] = "auto",
+) -> Dict[str, Any]:
+    """Bootstrap derived bronze contract tables from raw_game_logs when needed."""
+    normalized_mode = normalize_bronze_bootstrap_mode(mode)
+    raw_game_logs_table = f"{project_id}.{bronze_dataset}.raw_game_logs"
+    raw_game_logs_rows = get_table_row_count(bq_client, raw_game_logs_table)
+
+    domains: Dict[str, Dict[str, Any]] = {}
+    if not raw_game_logs_rows:
+        for domain, table_name in {
+            "schedule": "raw_schedule",
+            "game_line_scores": "raw_game_line_scores",
+            "player_reference": "raw_player_reference",
+        }.items():
+            domains[domain] = _skipped_bootstrap_domain(
+                domain=domain,
+                raw_table=f"{project_id}.{bronze_dataset}.{table_name}",
+                target_rows=None,
+                raw_game_logs_rows=raw_game_logs_rows,
+                mode=normalized_mode,
+                reason="raw_game_logs is missing or empty",
+            )
+        return {
+            "mode": normalized_mode,
+            "raw_game_logs_table": raw_game_logs_table,
+            "raw_game_logs_rows": raw_game_logs_rows,
+            "domains": domains,
+        }
+
+    domains["schedule"] = _bootstrap_domain(
+        bq_client=bq_client,
+        domain="schedule",
+        raw_game_logs_table=raw_game_logs_table,
+        raw_table=f"{project_id}.{bronze_dataset}.raw_schedule",
+        staging_table=f"{project_id}.{bronze_dataset}.stg_bootstrap_schedule",
+        create_staging=create_bronze_bootstrap_schedule_staging,
+        run_dq=lambda client, table: run_schedule_quality_checks(
+            client, table, season=season
+        ),
+        merge_table=create_and_merge_schedule_table,
+        season=season,
+        mode=normalized_mode,
+        raw_game_logs_rows=raw_game_logs_rows,
+    )
+    domains["game_line_scores"] = _bootstrap_domain(
+        bq_client=bq_client,
+        domain="game_line_scores",
+        raw_game_logs_table=raw_game_logs_table,
+        raw_table=f"{project_id}.{bronze_dataset}.raw_game_line_scores",
+        staging_table=f"{project_id}.{bronze_dataset}.stg_bootstrap_game_line_scores",
+        create_staging=create_bronze_bootstrap_line_scores_staging,
+        run_dq=lambda client, table: run_game_line_score_quality_checks(
+            client, table, season=season
+        ),
+        merge_table=create_and_merge_game_line_scores_table,
+        season=season,
+        mode=normalized_mode,
+        raw_game_logs_rows=raw_game_logs_rows,
+    )
+    domains["player_reference"] = _bootstrap_domain(
+        bq_client=bq_client,
+        domain="player_reference",
+        raw_game_logs_table=raw_game_logs_table,
+        raw_table=f"{project_id}.{bronze_dataset}.raw_player_reference",
+        staging_table=f"{project_id}.{bronze_dataset}.stg_bootstrap_player_reference",
+        create_staging=create_bronze_bootstrap_player_reference_staging,
+        run_dq=run_player_reference_quality_checks,
+        merge_table=create_and_merge_player_reference_table,
+        season=season,
+        mode=normalized_mode,
+        raw_game_logs_rows=raw_game_logs_rows,
+    )
+    return {
+        "mode": normalized_mode,
+        "raw_game_logs_table": raw_game_logs_table,
+        "raw_game_logs_rows": raw_game_logs_rows,
+        "domains": domains,
+    }
+
+
+def apply_bootstrap_domain_result(
+    current_result: Dict[str, Any],
+    bootstrap_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Add bootstrap accounting to a normal Airflow domain result."""
+    updated = dict(current_result)
+    updated["bronze_bootstrap"] = bootstrap_result
+    if not bootstrap_result.get("ran"):
+        return updated
+    for source_key, target_key in (
+        ("rows_loaded", "rows_loaded"),
+        ("rows_inserted", "rows_inserted"),
+        ("rows_updated", "rows_updated"),
+        ("rows_unchanged", "rows_unchanged"),
+    ):
+        updated[target_key] = int(updated.get(target_key, 0) or 0) + int(
+            bootstrap_result.get(source_key, 0) or 0
+        )
+    updated["bootstrap_dq_results"] = bootstrap_result.get("dq_results", {})
+    updated["bootstrap_reconciliation"] = bootstrap_result.get("reconciliation", {})
+    return updated
 
 
 _BQ_TYPE_MAP = {
@@ -1607,6 +2586,11 @@ def get_upcoming_schedule(
     season: str = SUPPORTED_SEASON,
     horizon_days: int = 7,
     today: Any = None,
+    retries: int = NBA_API_RETRIES,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
 ) -> pd.DataFrame:
     """Fetch upcoming schedule rows from nba_api scheduleleaguev2."""
     if season != SUPPORTED_SEASON:
@@ -1614,14 +2598,42 @@ def get_upcoming_schedule(
 
     base_day = coerce_to_date(today) or pd.Timestamp.now(tz="UTC").date()
     end_day = base_day + timedelta(days=max(horizon_days, 1) - 1)
-    schedule = scheduleleaguev2.ScheduleLeagueV2(season=season)
-    frames = schedule.get_data_frames()
+    retries = normalize_nba_api_retries(retries)
+    empty = pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+    frames = []
+    for attempt in range(1, retries + 1):
+        try:
+            schedule = scheduleleaguev2.ScheduleLeagueV2(
+                season=season,
+                timeout=timeout,
+            )
+            frames = schedule.get_data_frames()
+            break
+        except Exception:
+            if attempt == retries:
+                logger.exception(
+                    "Failed NBA API schedule season=%s after %s attempts timeout=%.1fs",
+                    season,
+                    retries,
+                    timeout,
+                )
+                return empty.copy()
+            _sleep_before_nba_api_retry(
+                domain="schedule",
+                identifier=season,
+                attempt=attempt,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
+            )
     if not frames:
-        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+        return empty.copy()
 
     raw = frames[0].copy()
     if raw.empty:
-        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+        return empty.copy()
 
     raw["gameDate"] = pd.to_datetime(raw["gameDate"], errors="coerce").dt.date
     raw["gameDateTimeUTC"] = pd.to_datetime(
@@ -1630,7 +2642,7 @@ def get_upcoming_schedule(
     raw = raw[(raw["gameDate"] >= base_day) & (raw["gameDate"] <= end_day)].copy()
 
     if raw.empty:
-        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+        return empty.copy()
 
     ingested_at = pd.Timestamp.now(tz="UTC")
     team_rows: list[dict[str, Any]] = []
@@ -1675,7 +2687,7 @@ def get_upcoming_schedule(
 
     df = pd.DataFrame(team_rows)
     if df.empty:
-        return pd.DataFrame(columns=[field.name for field in get_schedule_schema()])
+        return empty.copy()
     df = df.drop_duplicates(subset=["GAME_ID", "TEAM_ABBR"]).copy()
     df["SCHEDULE_DATE"] = pd.to_datetime(df["SCHEDULE_DATE"], errors="coerce")
     df = df.sort_values(["TEAM_ABBR", "SCHEDULE_DATE", "GAME_ID"]).reset_index(
