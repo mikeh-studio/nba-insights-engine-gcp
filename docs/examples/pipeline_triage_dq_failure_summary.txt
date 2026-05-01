@@ -1,1 +1,0 @@
-Run manual__2026-04-21T11:00:00+00:00 failed with primary classification dq_failure at stage dq_checks. Failing task(s): dq_game_log_staging. Evidence: DQ failed: found 4 duplicate business keys. Next: Inspect duplicate business key violations in nba-data-485505.nba_bronze.stg_game_logs before rerunning the merge.

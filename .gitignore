@@ -39,6 +39,12 @@ airflow.db
 webserver_config.py
 logs/
 
+# Local-only docs
+CLAUDE.md
+AGENTS.md
+DESIGN.md
+TODOS.md
+
 # One-off artifacts
 reports/
 .gstack/
