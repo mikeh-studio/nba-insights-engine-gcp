@@ -17,6 +17,7 @@ target/
 
 # Terraform
 .terraform/
+.terraform.lock.hcl
 *.tfvars
 *.tfstate
 *.tfstate.backup
@@ -39,9 +40,11 @@ airflow.db
 webserver_config.py
 logs/
 
-# Agent instructions (local-only)
+# Local-only docs
 CLAUDE.md
 AGENTS.md
+DESIGN.md
+TODOS.md
 
 # One-off artifacts
 reports/
