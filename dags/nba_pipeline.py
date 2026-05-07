@@ -11,7 +11,9 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
+from io import BytesIO
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from google.api_core.exceptions import NotFound
@@ -25,6 +27,10 @@ from nba_api.stats.static import players
 logger = logging.getLogger("nba_pipeline")
 
 SOURCE_SYSTEM = "nba_api"
+INJURY_REPORT_SOURCE_SYSTEM = "nba_official_injury_report"
+OFFICIAL_INJURY_REPORT_BASE_URL = "https://ak-static.cms.nba.com/referee/injury"
+DEFAULT_INJURY_REPORT_TIME_ET = "05_00PM"
+DEFAULT_PLAYOFF_BACKFILL_START = date(2026, 4, 18)
 SUPPORTED_SEASON = "2025-26"
 SUPPORTED_SEASON_START = date(2025, 7, 1)
 SUPPORTED_SEASON_END = date(2026, 6, 30)
@@ -76,6 +82,20 @@ NBA_TEAM_LOOKUP: Tuple[Dict[str, Any], ...] = tuple(
     for team_abbr, team_id, team_city_name, team_nickname in NBA_TEAM_LOOKUP_ROWS
 )
 NBA_TEAM_LOOKUP_BY_ABBR = {team["team_abbr"]: team for team in NBA_TEAM_LOOKUP}
+NBA_TEAM_NAME_TO_ABBR = {
+    f"{team['team_city_name']} {team['team_nickname']}".upper(): team["team_abbr"]
+    for team in NBA_TEAM_LOOKUP
+}
+NBA_TEAM_NAME_TO_ABBR["LOS ANGELES CLIPPERS"] = "LAC"
+NBA_TEAM_NAME_TO_ABBR["LA CLIPPERS"] = "LAC"
+NBA_TEAM_NAME_CANONICAL = {
+    f"{team['team_city_name']} {team['team_nickname']}".upper(): (
+        f"{team['team_city_name']} {team['team_nickname']}"
+    )
+    for team in NBA_TEAM_LOOKUP
+}
+NBA_TEAM_NAME_CANONICAL["LOS ANGELES CLIPPERS"] = "Los Angeles Clippers"
+NBA_TEAM_NAME_CANONICAL["LA CLIPPERS"] = "LA Clippers"
 
 
 def get_season_date_bounds(season: str = SUPPORTED_SEASON) -> Tuple[date, date]:
@@ -287,7 +307,13 @@ def upsert_ingestion_state(
     ON T.source_system = S.source_system
     AND T.season = S.season
     WHEN MATCHED THEN
-      UPDATE SET watermark_date = S.watermark_date, updated_at_utc = S.updated_at_utc
+      UPDATE SET
+        watermark_date = CASE
+          WHEN T.watermark_date IS NULL OR S.watermark_date > T.watermark_date
+            THEN S.watermark_date
+          ELSE T.watermark_date
+        END,
+        updated_at_utc = S.updated_at_utc
     WHEN NOT MATCHED THEN
       INSERT (source_system, season, watermark_date, updated_at_utc)
       VALUES (S.source_system, S.season, S.watermark_date, S.updated_at_utc)
@@ -988,6 +1014,476 @@ def get_player_reference_schema() -> List[bigquery.SchemaField]:
     ]
 
 
+def get_injury_report_schema() -> List[bigquery.SchemaField]:
+    """Return the BigQuery schema for official NBA injury report rows."""
+    return [
+        bigquery.SchemaField("REPORT_DATE", "DATE"),
+        bigquery.SchemaField("REPORT_TIME_ET", "STRING"),
+        bigquery.SchemaField("REPORT_TIMESTAMP_UTC", "TIMESTAMP"),
+        bigquery.SchemaField("GAME_DATE", "DATE"),
+        bigquery.SchemaField("GAME_TIME_ET", "STRING"),
+        bigquery.SchemaField("MATCHUP", "STRING"),
+        bigquery.SchemaField("SEASON", "STRING"),
+        bigquery.SchemaField("TEAM_ABBR", "STRING"),
+        bigquery.SchemaField("TEAM_NAME", "STRING"),
+        bigquery.SchemaField("PLAYER_ID", "INTEGER"),
+        bigquery.SchemaField("PLAYER_NAME", "STRING"),
+        bigquery.SchemaField("PLAYER_NAME_SOURCE", "STRING"),
+        bigquery.SchemaField("INJURY_STATUS", "STRING"),
+        bigquery.SchemaField("REASON", "STRING"),
+        bigquery.SchemaField("SOURCE_URL", "STRING"),
+        bigquery.SchemaField("SOURCE_SYSTEM", "STRING"),
+        bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
+    ]
+
+
+INJURY_REPORT_STATUSES = ("Available", "Probable", "Questionable", "Doubtful", "Out")
+INJURY_REPORT_STATUS_PATTERN = re.compile(
+    r"\s(" + "|".join(INJURY_REPORT_STATUSES) + r")\b", re.IGNORECASE
+)
+_INJURY_DATE_TIME_MATCHUP_RE = re.compile(
+    r"^(\d{1,2}/\d{1,2}/\d{4})\s+"
+    r"(\d{1,2}:\d{2}\s*\([A-Za-z]{2,}\))\s+"
+    r"([A-Z]{2,3}@[A-Z]{2,3})\s+(.+)$"
+)
+_INJURY_TIME_MATCHUP_RE = re.compile(
+    r"^(\d{1,2}:\d{2}\s*\([A-Za-z]{2,}\))\s+" r"([A-Z]{2,3}@[A-Z]{2,3})\s+(.+)$"
+)
+
+
+def normalize_player_name_key(name: Any) -> str:
+    """Normalize a public NBA player name for deterministic local matching."""
+    if name is None:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(name).lower()).strip()
+    return re.sub(r"\s+", " ", normalized)
+
+
+def normalize_official_player_name(name: Any) -> str:
+    """Convert official injury report names from 'Last, First' when possible."""
+    value = str(name or "").strip()
+    if "," not in value:
+        return re.sub(r"\s+", " ", value)
+    last, first = [part.strip() for part in value.split(",", 1)]
+    return re.sub(r"\s+", " ", f"{first} {last}".strip())
+
+
+def build_player_id_lookup(
+    player_rows: Optional[Iterable[dict]] = None,
+) -> dict[str, int]:
+    """Build a local lookup from NBA static player names to NBA player IDs."""
+    source_rows = (
+        list(player_rows) if player_rows is not None else players.get_players()
+    )
+    lookup: dict[str, int] = {}
+    for player_row in source_rows:
+        player_id = player_row.get("id") or player_row.get("PERSON_ID")
+        player_name = (
+            player_row.get("full_name")
+            or player_row.get("DISPLAY_FIRST_LAST")
+            or player_row.get("PLAYER_NAME")
+        )
+        key = normalize_player_name_key(player_name)
+        if key and player_id is not None:
+            lookup[key] = int(player_id)
+    return lookup
+
+
+def normalize_injury_report_status(status: Any) -> str:
+    """Return a canonical NBA injury report status."""
+    value = str(status or "").strip().lower()
+    for allowed in INJURY_REPORT_STATUSES:
+        if value == allowed.lower():
+            return allowed
+    return str(status or "").strip()
+
+
+def normalize_injury_report_time_et(value: Any) -> str:
+    """Normalize configured report times to the official URL token format."""
+    raw = str(value or "").strip().upper().replace(".", "")
+    if not raw:
+        return DEFAULT_INJURY_REPORT_TIME_ET
+    raw = raw.replace(" ", "")
+    if re.fullmatch(r"\d{2}_\d{2}(AM|PM)", raw):
+        return raw
+    match = re.fullmatch(r"(\d{1,2}):?(\d{2})(AM|PM)", raw)
+    if match:
+        hour, minute, suffix = match.groups()
+        return f"{int(hour):02d}_{minute}{suffix}"
+    match = re.fullmatch(r"(\d{1,2})_(\d{2})(AM|PM)", raw)
+    if match:
+        hour, minute, suffix = match.groups()
+        return f"{int(hour):02d}_{minute}{suffix}"
+    raise ValueError(f"Unsupported NBA injury report time: {value!r}")
+
+
+def build_official_injury_report_url(report_date: Any, report_time_et: Any) -> str:
+    """Build the official NBA injury report PDF URL for one report timestamp."""
+    report_day = coerce_to_date(report_date)
+    if report_day is None:
+        raise ValueError(f"Invalid injury report date: {report_date!r}")
+    time_token = normalize_injury_report_time_et(report_time_et)
+    return (
+        f"{OFFICIAL_INJURY_REPORT_BASE_URL}/"
+        f"Injury-Report_{report_day.isoformat()}_{time_token}.pdf"
+    )
+
+
+def injury_report_timestamp_utc(report_date: Any, report_time_et: Any) -> datetime:
+    """Convert an official report date/time token from ET to UTC."""
+    report_day = coerce_to_date(report_date)
+    if report_day is None:
+        raise ValueError(f"Invalid injury report date: {report_date!r}")
+    time_token = normalize_injury_report_time_et(report_time_et)
+    local_dt = datetime.strptime(
+        f"{report_day.isoformat()} {time_token}", "%Y-%m-%d %I_%M%p"
+    ).replace(tzinfo=ZoneInfo("America/New_York"))
+    return local_dt.astimezone(ZoneInfo("UTC"))
+
+
+def build_injury_report_candidates(
+    *,
+    start_date: Any,
+    end_date: Any,
+    report_times_et: Iterable[Any],
+    max_reports: int,
+) -> list[dict[str, Any]]:
+    """Build a bounded list of official injury report PDFs to fetch."""
+    start = coerce_to_date(start_date)
+    end = coerce_to_date(end_date)
+    if start is None or end is None:
+        raise ValueError("start_date and end_date are required for injury reports")
+    if end < start:
+        return []
+
+    normalized_times = [
+        normalize_injury_report_time_et(time) for time in report_times_et
+    ]
+    if not normalized_times:
+        normalized_times = [DEFAULT_INJURY_REPORT_TIME_ET]
+
+    candidates: list[dict[str, Any]] = []
+    current = start
+    while current <= end:
+        for report_time in normalized_times:
+            candidates.append(
+                {
+                    "report_date": current,
+                    "report_time_et": report_time,
+                    "source_url": build_official_injury_report_url(
+                        current, report_time
+                    ),
+                }
+            )
+        current += timedelta(days=1)
+
+    limit = max(int(max_reports), 0)
+    if limit and len(candidates) > limit:
+        return candidates[-limit:]
+    return candidates
+
+
+def extract_text_from_injury_report_pdf(pdf_content: bytes) -> str:
+    """Extract text from an official NBA injury report PDF."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError(
+            "pypdf is required to parse NBA injury report PDFs. "
+            "Install project requirements before enabling injury ingestion."
+        ) from exc
+
+    reader = PdfReader(BytesIO(pdf_content))
+    page_text = [page.extract_text() or "" for page in reader.pages]
+    return "\n".join(page_text)
+
+
+def _split_injury_report_team_prefix(value: str) -> tuple[Optional[str], str]:
+    value_upper = value.upper()
+    for team_name in sorted(NBA_TEAM_NAME_TO_ABBR, key=len, reverse=True):
+        if value_upper == team_name:
+            return NBA_TEAM_NAME_CANONICAL.get(team_name, team_name.title()), ""
+        if value_upper.startswith(f"{team_name} "):
+            return (
+                NBA_TEAM_NAME_CANONICAL.get(team_name, team_name.title()),
+                value[len(team_name) :].strip(),
+            )
+    return None, value
+
+
+def parse_injury_report_text(
+    text: str,
+    *,
+    report_date: Any,
+    report_time_et: Any,
+    source_url: str,
+    season: str = SUPPORTED_SEASON,
+    player_lookup: Optional[dict[str, int]] = None,
+    ingested_at_utc: Any = None,
+) -> pd.DataFrame:
+    """Parse official NBA injury report PDF text into normalized rows."""
+    lookup = player_lookup if player_lookup is not None else build_player_id_lookup()
+    report_day = coerce_to_date(report_date)
+    report_time = normalize_injury_report_time_et(report_time_et)
+    report_ts = injury_report_timestamp_utc(report_day, report_time)
+    ingested_at = pd.to_datetime(
+        ingested_at_utc or pd.Timestamp.now(tz="UTC"), utc=True
+    )
+    rows: list[dict[str, Any]] = []
+    context: dict[str, Any] = {
+        "game_date": None,
+        "game_time_et": "",
+        "matchup": "",
+        "team_name": "",
+        "team_abbr": "",
+    }
+    last_row: Optional[dict[str, Any]] = None
+
+    for raw_line in str(text or "").splitlines():
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            continue
+        if "Injury Report:" in line or line.startswith("Page "):
+            continue
+        if line.startswith("Game Date Game Time Matchup"):
+            continue
+
+        remainder = line
+        date_match = _INJURY_DATE_TIME_MATCHUP_RE.match(line)
+        if date_match:
+            game_date_raw, game_time, matchup, remainder = date_match.groups()
+            context["game_date"] = coerce_to_date(game_date_raw)
+            context["game_time_et"] = game_time
+            context["matchup"] = matchup.upper()
+        else:
+            time_match = _INJURY_TIME_MATCHUP_RE.match(line)
+            if time_match:
+                game_time, matchup, remainder = time_match.groups()
+                context["game_time_et"] = game_time
+                context["matchup"] = matchup.upper()
+
+        team_name, remainder = _split_injury_report_team_prefix(remainder)
+        if team_name:
+            normalized_team_name = re.sub(r"\s+", " ", team_name).strip()
+            context["team_name"] = normalized_team_name
+            context["team_abbr"] = NBA_TEAM_NAME_TO_ABBR.get(
+                normalized_team_name.upper(), ""
+            )
+
+        if remainder.upper() == "NOT YET SUBMITTED":
+            last_row = None
+            continue
+
+        status_match = INJURY_REPORT_STATUS_PATTERN.search(remainder)
+        if not status_match:
+            if last_row is not None:
+                last_row["REASON"] = " ".join(
+                    part for part in [last_row.get("REASON", ""), remainder] if part
+                ).strip()
+            continue
+
+        player_source = remainder[: status_match.start()].strip()
+        status = normalize_injury_report_status(status_match.group(1))
+        reason = remainder[status_match.end() :].strip()
+        if not player_source or player_source.upper() == "NOT YET SUBMITTED":
+            last_row = None
+            continue
+        if not all(
+            [
+                context["game_date"],
+                context["matchup"],
+                context["team_abbr"],
+                status,
+            ]
+        ):
+            last_row = None
+            continue
+
+        player_name = normalize_official_player_name(player_source)
+        player_id = lookup.get(normalize_player_name_key(player_name))
+        row = {
+            "REPORT_DATE": report_day,
+            "REPORT_TIME_ET": report_time,
+            "REPORT_TIMESTAMP_UTC": report_ts,
+            "GAME_DATE": context["game_date"],
+            "GAME_TIME_ET": context["game_time_et"],
+            "MATCHUP": context["matchup"],
+            "SEASON": season,
+            "TEAM_ABBR": context["team_abbr"],
+            "TEAM_NAME": context["team_name"],
+            "PLAYER_ID": player_id,
+            "PLAYER_NAME": player_name,
+            "PLAYER_NAME_SOURCE": player_source,
+            "INJURY_STATUS": status,
+            "REASON": reason,
+            "SOURCE_URL": source_url,
+            "SOURCE_SYSTEM": INJURY_REPORT_SOURCE_SYSTEM,
+            "INGESTED_AT_UTC": ingested_at,
+        }
+        rows.append(row)
+        last_row = row
+
+    if not rows:
+        return _empty_dataframe_for_schema(get_injury_report_schema())
+
+    df = pd.DataFrame(rows)
+    df = df.drop_duplicates(
+        subset=[
+            "REPORT_TIMESTAMP_UTC",
+            "GAME_DATE",
+            "MATCHUP",
+            "TEAM_ABBR",
+            "PLAYER_NAME_SOURCE",
+        ]
+    ).copy()
+    return df[[field.name for field in get_injury_report_schema()]]
+
+
+def fetch_official_injury_report_pdf(
+    source_url: str,
+    *,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retries: int = NBA_API_RETRIES,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
+    client: Any = None,
+) -> Optional[bytes]:
+    """Fetch one official NBA injury report PDF with bounded retries."""
+    import httpx
+
+    retries = normalize_nba_api_retries(retries)
+    owns_client = client is None
+    if client is None:
+        client = httpx.Client(timeout=timeout, follow_redirects=True)
+    try:
+        for attempt in range(1, retries + 1):
+            try:
+                response = client.get(source_url, timeout=timeout)
+                if getattr(response, "status_code", None) == 404:
+                    logger.info("Official injury report not found: %s", source_url)
+                    return None
+                response.raise_for_status()
+                return response.content
+            except Exception:
+                if attempt == retries:
+                    logger.exception(
+                        "Failed official injury report fetch url=%s after %s attempts",
+                        source_url,
+                        retries,
+                    )
+                    return None
+                _sleep_before_nba_api_retry(
+                    domain="injury_report",
+                    identifier=source_url,
+                    attempt=attempt,
+                    retries=retries,
+                    timeout=timeout,
+                    retry_base_delay=retry_base_delay,
+                    retry_backoff_multiplier=retry_backoff_multiplier,
+                    retry_max_delay=retry_max_delay,
+                )
+    finally:
+        if owns_client:
+            client.close()
+    return None
+
+
+def get_official_injury_report(
+    candidate: dict[str, Any],
+    *,
+    season: str = SUPPORTED_SEASON,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retries: int = NBA_API_RETRIES,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
+    player_lookup: Optional[dict[str, int]] = None,
+    client: Any = None,
+) -> pd.DataFrame:
+    """Fetch and parse one official NBA injury report candidate."""
+    pdf_content = fetch_official_injury_report_pdf(
+        candidate["source_url"],
+        timeout=timeout,
+        retries=retries,
+        retry_base_delay=retry_base_delay,
+        retry_backoff_multiplier=retry_backoff_multiplier,
+        retry_max_delay=retry_max_delay,
+        client=client,
+    )
+    if pdf_content is None:
+        return _empty_dataframe_for_schema(get_injury_report_schema())
+
+    text = extract_text_from_injury_report_pdf(pdf_content)
+    return parse_injury_report_text(
+        text,
+        report_date=candidate["report_date"],
+        report_time_et=candidate["report_time_et"],
+        source_url=candidate["source_url"],
+        season=season,
+        player_lookup=player_lookup,
+    )
+
+
+def get_all_official_injury_reports(
+    candidates: Iterable[dict[str, Any]],
+    *,
+    season: str = SUPPORTED_SEASON,
+    delay: float = 0.25,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retries: int = NBA_API_RETRIES,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
+) -> pd.DataFrame:
+    """Fetch a bounded set of official NBA injury reports."""
+    import httpx
+
+    player_lookup = build_player_id_lookup()
+    frames: list[pd.DataFrame] = []
+    candidate_list = list(candidates)
+    if not candidate_list:
+        return _empty_dataframe_for_schema(get_injury_report_schema())
+
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        for candidate in candidate_list:
+            frame = get_official_injury_report(
+                candidate,
+                season=season,
+                timeout=timeout,
+                retries=retries,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
+                player_lookup=player_lookup,
+                client=client,
+            )
+            if not frame.empty:
+                frames.append(frame)
+            time.sleep(max(delay, 0))
+
+    if not frames:
+        return _empty_dataframe_for_schema(get_injury_report_schema())
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.drop_duplicates(
+        subset=[
+            "REPORT_TIMESTAMP_UTC",
+            "GAME_DATE",
+            "MATCHUP",
+            "TEAM_ABBR",
+            "PLAYER_NAME_SOURCE",
+        ]
+    ).copy()
+    combined = combined.sort_values(
+        ["REPORT_TIMESTAMP_UTC", "GAME_DATE", "MATCHUP", "TEAM_ABBR", "PLAYER_NAME"],
+        ascending=[True, True, True, True, True],
+    )
+    return combined[[field.name for field in get_injury_report_schema()]].reset_index(
+        drop=True
+    )
+
+
 def _empty_dataframe_for_schema(schema: List[bigquery.SchemaField]) -> pd.DataFrame:
     return pd.DataFrame(columns=[field.name for field in schema])
 
@@ -1293,6 +1789,18 @@ def should_bootstrap_bronze_table(
     if normalized == "force":
         return True
     return target_rows in (None, 0)
+
+
+_BIGQUERY_TABLE_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_-]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*$"
+)
+
+
+def quote_bigquery_table_id(table_id: str) -> str:
+    """Return a backticked BigQuery table identifier after conservative validation."""
+    if not _BIGQUERY_TABLE_ID_RE.fullmatch(str(table_id or "")):
+        raise ValueError(f"Unsafe BigQuery table identifier: {table_id!r}")
+    return f"`{table_id}`"
 
 
 def get_table_row_count(
@@ -2834,6 +3342,213 @@ def create_and_merge_schedule_table(
     bq_client.query(merge_sql).result()
     post_count = (
         bq_client.query(f"SELECT COUNT(*) AS c FROM `{raw_table}`")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    return {
+        "pre_count": int(pre_count),
+        "post_count": int(post_count),
+        "inserted": int(stats["inserted"]),
+        "updated": int(stats["updated"]),
+    }
+
+
+def run_injury_report_quality_checks(
+    bq_client: bigquery.Client,
+    staging_table: str,
+    *,
+    season: str = SUPPORTED_SEASON,
+) -> dict:
+    """Run data quality checks on official injury report staging rows."""
+    season_start, season_end = get_season_date_bounds(season)
+    staging_relation = quote_bigquery_table_id(staging_table)
+    dq_query = f"""
+    WITH base AS (
+      SELECT *
+      FROM {staging_relation}
+    ),
+    dups AS (
+      SELECT COUNT(*) AS duplicate_keys
+      FROM (
+        SELECT
+          report_timestamp_utc,
+          game_date,
+          matchup,
+          team_abbr,
+          player_name_source,
+          COUNT(*) AS cnt
+        FROM base
+        GROUP BY 1, 2, 3, 4, 5
+        HAVING COUNT(*) > 1
+      )
+    )
+    SELECT
+      (SELECT COUNT(*) FROM base) AS total_rows,
+      (
+        SELECT COUNT(*)
+        FROM base
+        WHERE report_date IS NULL
+           OR report_timestamp_utc IS NULL
+           OR game_date IS NULL
+           OR matchup IS NULL
+           OR team_abbr IS NULL
+           OR player_name_source IS NULL
+           OR injury_status IS NULL
+      ) AS null_key_rows,
+      (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
+      (SELECT COUNT(*) FROM base WHERE season != @season OR season IS NULL) AS invalid_season_rows,
+      (SELECT COUNT(*) FROM base WHERE game_date < @season_start OR game_date > @season_end) AS out_of_window_rows,
+      (
+        SELECT COUNT(*)
+        FROM base
+        WHERE injury_status NOT IN ('Available', 'Probable', 'Questionable', 'Doubtful', 'Out')
+      ) AS invalid_status_rows,
+      (SELECT COUNT(*) FROM base WHERE player_id IS NULL) AS unmatched_player_rows
+    """
+    dq = (
+        bq_client.query(
+            dq_query,
+            job_config=bigquery.QueryJobConfig(
+                query_parameters=[
+                    bigquery.ScalarQueryParameter("season", "STRING", season),
+                    bigquery.ScalarQueryParameter(
+                        "season_start", "DATE", season_start.isoformat()
+                    ),
+                    bigquery.ScalarQueryParameter(
+                        "season_end", "DATE", season_end.isoformat()
+                    ),
+                ]
+            ),
+        )
+        .to_dataframe()
+        .iloc[0]
+        .to_dict()
+    )
+    if dq["total_rows"] == 0:
+        raise ValueError("DQ failed: injury report staging table has zero rows")
+    if dq["null_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['null_key_rows']} injury report rows with null keys"
+        )
+    if dq["duplicate_key_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['duplicate_key_rows']} duplicate injury report rows"
+        )
+    if dq["invalid_season_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_season_rows']} injury rows outside season {season}"
+        )
+    if dq["out_of_window_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['out_of_window_rows']} injury rows outside date window "
+            f"{season_start.isoformat()} to {season_end.isoformat()}"
+        )
+    if dq["invalid_status_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_status_rows']} invalid injury statuses"
+        )
+    return dq
+
+
+def create_and_merge_injury_report_table(
+    bq_client: bigquery.Client, staging_table: str, raw_table: str
+) -> Dict[str, int]:
+    """Create official injury report raw table if needed and merge staging rows."""
+    staging_relation = quote_bigquery_table_id(staging_table)
+    raw_relation = quote_bigquery_table_id(raw_table)
+    create_ddl = f"""
+    CREATE TABLE IF NOT EXISTS {raw_relation} (
+      report_date DATE,
+      report_time_et STRING,
+      report_timestamp_utc TIMESTAMP,
+      game_date DATE,
+      game_time_et STRING,
+      matchup STRING,
+      season STRING,
+      team_abbr STRING,
+      team_name STRING,
+      player_id INT64,
+      player_name STRING,
+      player_name_source STRING,
+      injury_status STRING,
+      reason STRING,
+      source_url STRING,
+      source_system STRING,
+      ingested_at_utc TIMESTAMP
+    )
+    PARTITION BY report_date
+    CLUSTER BY team_abbr, player_id
+    """
+    change_predicate = """
+      COALESCE(T.report_time_et, '') != COALESCE(S.report_time_et, '')
+      OR COALESCE(T.game_time_et, '') != COALESCE(S.game_time_et, '')
+      OR COALESCE(T.season, '') != COALESCE(S.season, '')
+      OR COALESCE(T.team_name, '') != COALESCE(S.team_name, '')
+      OR COALESCE(T.player_id, -1) != COALESCE(S.player_id, -1)
+      OR COALESCE(T.player_name, '') != COALESCE(S.player_name, '')
+      OR COALESCE(T.injury_status, '') != COALESCE(S.injury_status, '')
+      OR COALESCE(T.reason, '') != COALESCE(S.reason, '')
+      OR COALESCE(T.source_url, '') != COALESCE(S.source_url, '')
+      OR COALESCE(T.source_system, '') != COALESCE(S.source_system, '')
+    """
+    stats_sql = f"""
+    SELECT
+      COUNTIF(t.report_timestamp_utc IS NULL) AS inserted,
+      COUNTIF(t.report_timestamp_utc IS NOT NULL AND ({change_predicate.replace('T.', 't.').replace('S.', 's.')})) AS updated
+    FROM {staging_relation} s
+    LEFT JOIN {raw_relation} t
+      ON t.report_timestamp_utc = s.report_timestamp_utc
+     AND t.game_date = s.game_date
+     AND t.matchup = s.matchup
+     AND t.team_abbr = s.team_abbr
+     AND t.player_name_source = s.player_name_source
+    """
+    merge_sql = f"""
+    MERGE {raw_relation} T
+    USING {staging_relation} S
+    ON T.report_timestamp_utc = S.report_timestamp_utc
+    AND T.game_date = S.game_date
+    AND T.matchup = S.matchup
+    AND T.team_abbr = S.team_abbr
+    AND T.player_name_source = S.player_name_source
+    WHEN MATCHED AND ({change_predicate}) THEN UPDATE SET
+      report_date = S.report_date,
+      report_time_et = S.report_time_et,
+      game_time_et = S.game_time_et,
+      season = S.season,
+      team_name = S.team_name,
+      player_id = S.player_id,
+      player_name = S.player_name,
+      injury_status = S.injury_status,
+      reason = S.reason,
+      source_url = S.source_url,
+      source_system = S.source_system,
+      ingested_at_utc = S.ingested_at_utc
+    WHEN NOT MATCHED THEN
+      INSERT (
+        report_date, report_time_et, report_timestamp_utc, game_date, game_time_et,
+        matchup, season, team_abbr, team_name, player_id, player_name,
+        player_name_source, injury_status, reason, source_url, source_system,
+        ingested_at_utc
+      )
+      VALUES (
+        S.report_date, S.report_time_et, S.report_timestamp_utc, S.game_date,
+        S.game_time_et, S.matchup, S.season, S.team_abbr, S.team_name, S.player_id,
+        S.player_name, S.player_name_source, S.injury_status, S.reason, S.source_url,
+        S.source_system, S.ingested_at_utc
+      )
+    """
+    bq_client.query(create_ddl).result()
+    ensure_table_has_columns(bq_client, raw_table, get_injury_report_schema())
+    pre_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM {raw_relation}")
+        .to_dataframe()
+        .iloc[0]["c"]
+    )
+    stats = bq_client.query(stats_sql).to_dataframe().iloc[0].to_dict()
+    bq_client.query(merge_sql).result()
+    post_count = (
+        bq_client.query(f"SELECT COUNT(*) AS c FROM {raw_relation}")
         .to_dataframe()
         .iloc[0]["c"]
     )

@@ -216,6 +216,40 @@ models:
               arguments:
                 to: ref('dim_player')
                 field: player_id
+  - name: player_availability_current
+    columns:
+      - name: as_of_date
+        tests: [not_null]
+      - name: season
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['2025-26']
+      - name: player_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_player')
+                field: player_id
+      - name: team_abbr
+        tests:
+          - accepted_values:
+              arguments:
+                values: *nba_team_abbrs
+      - name: injury_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['Available', 'Probable', 'Questionable', 'Doubtful', 'Out']
+      - name: is_report_stale
+        tests: [not_null]
+      - name: availability_bucket
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['available', 'probable', 'at_risk', 'unavailable', 'unknown']
   - name: daily_leaderboard
     columns:
       - name: season

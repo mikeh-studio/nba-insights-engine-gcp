@@ -72,3 +72,14 @@ sources:
             tests: [not_null, unique]
           - name: player_name
             tests: [not_null]
+      - name: raw_player_injury_reports
+        columns:
+          - name: report_date
+          - name: report_timestamp_utc
+          - name: game_date
+          - name: matchup
+          - name: team_abbr
+          - name: player_id
+          - name: player_name
+          - name: injury_status
+          - name: ingested_at_utc

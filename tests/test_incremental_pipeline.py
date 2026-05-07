@@ -198,6 +198,35 @@ def test_build_run_metadata_record_serializes_dates():
     assert record["rows_updated"] == 6
 
 
+def test_upsert_ingestion_state_preserves_existing_newer_watermark():
+    class DummyJob:
+        def result(self):
+            return None
+
+    class DummyClient:
+        def __init__(self):
+            self.statements = []
+
+        def query(self, statement, job_config=None):
+            self.statements.append(statement)
+            return DummyJob()
+
+    client = DummyClient()
+
+    pipeline.upsert_ingestion_state(
+        client,
+        "project.dataset.ingestion_state",
+        season="2025-26",
+        watermark_date="2026-05-01",
+    )
+
+    assert (
+        "WHEN T.watermark_date IS NULL OR S.watermark_date > T.watermark_date"
+        in client.statements[0]
+    )
+    assert "ELSE T.watermark_date" in client.statements[0]
+
+
 def test_validate_merge_reconciliation_returns_unchanged_rows():
     result = pipeline.validate_merge_reconciliation(
         domain="game_logs",
@@ -251,6 +280,139 @@ def test_validate_merge_reconciliation_rejects_post_count_mismatch():
 def test_game_logs_schema_includes_game_id():
     schema_names = [field.name for field in pipeline.get_game_logs_schema()]
     assert schema_names[0] == "GAME_ID"
+
+
+def test_quote_bigquery_table_id_rejects_unsafe_identifier():
+    assert (
+        pipeline.quote_bigquery_table_id("demo-project.nba_bronze.raw_reports")
+        == "`demo-project.nba_bronze.raw_reports`"
+    )
+    try:
+        pipeline.quote_bigquery_table_id("demo.nba_bronze.raw_reports`; DROP TABLE x;")
+    except ValueError as exc:
+        assert "Unsafe BigQuery table identifier" in str(exc)
+    else:
+        raise AssertionError("Expected unsafe table identifier to raise")
+
+
+def test_injury_report_schema_includes_report_timestamp():
+    schema_names = [field.name for field in pipeline.get_injury_report_schema()]
+    assert "REPORT_TIMESTAMP_UTC" in schema_names
+    assert "PLAYER_NAME_SOURCE" in schema_names
+
+
+def test_build_injury_report_candidates_applies_max_report_cap():
+    candidates = pipeline.build_injury_report_candidates(
+        start_date="2026-05-01",
+        end_date="2026-05-05",
+        report_times_et=["5:00 PM"],
+        max_reports=3,
+    )
+
+    assert [candidate["report_date"].isoformat() for candidate in candidates] == [
+        "2026-05-03",
+        "2026-05-04",
+        "2026-05-05",
+    ]
+    assert candidates[-1]["source_url"].endswith("Injury-Report_2026-05-05_05_00PM.pdf")
+
+
+def test_parse_injury_report_text_extracts_rows_and_reason_continuations():
+    text = """
+    Injury Report: 05/06/26 05:00 PM
+    Page 1 of 1
+    Game Date Game Time Matchup Team Player Name Current Status Reason
+    05/06/2026 07:00 (ET) PHI@NYK Philadelphia 76ers Embiid, Joel Out
+    Injury/Illness - Right Ankle; Sprain;
+    Right Hip Soreness
+    Maxey, Tyrese Available
+    Injury/Illness - Right Finger; Tendon Strain - Splint
+    New York Knicks Robinson, Mitchell Questionable Injury/Illness - Illness; Illness
+    05/07/2026 09:30 (ET) LAL@OKC Los Angeles Lakers NOT YET SUBMITTED
+    Oklahoma City Thunder Holmgren, Chet Probable Injury/Illness - Hip; Soreness
+    """
+    lookup = {
+        "joel embiid": 203954,
+        "tyrese maxey": 1630178,
+        "mitchell robinson": 1629011,
+        "chet holmgren": 1631096,
+    }
+
+    result = pipeline.parse_injury_report_text(
+        text,
+        report_date="2026-05-06",
+        report_time_et="5:00 PM",
+        source_url="https://example.test/injury.pdf",
+        player_lookup=lookup,
+        ingested_at_utc="2026-05-06T22:00:00+00:00",
+    )
+
+    assert result["PLAYER_NAME"].tolist() == [
+        "Joel Embiid",
+        "Tyrese Maxey",
+        "Mitchell Robinson",
+        "Chet Holmgren",
+    ]
+    embiid = result[result["PLAYER_ID"] == 203954].iloc[0]
+    assert embiid["TEAM_ABBR"] == "PHI"
+    assert embiid["INJURY_STATUS"] == "Out"
+    assert "Right Hip Soreness" in embiid["REASON"]
+    assert "NOT YET SUBMITTED" not in result["PLAYER_NAME_SOURCE"].tolist()
+
+
+def test_fetch_official_injury_report_pdf_passes_timeout_to_client():
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b"%PDF-1.4"
+
+        def raise_for_status(self):
+            return None
+
+    class FakeClient:
+        def get(self, url, timeout):
+            captured["url"] = url
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+    content = pipeline.fetch_official_injury_report_pdf(
+        "https://example.test/report.pdf",
+        timeout=4.5,
+        retries=1,
+        client=FakeClient(),
+    )
+
+    assert content == b"%PDF-1.4"
+    assert captured == {"url": "https://example.test/report.pdf", "timeout": 4.5}
+
+
+def test_fetch_official_injury_report_pdf_soft_fails_after_retries(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class FailingClient:
+        def get(self, url, timeout):
+            calls.append((url, timeout))
+            raise TimeoutError("injury report timeout")
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = pipeline.fetch_official_injury_report_pdf(
+        "https://example.test/report.pdf",
+        timeout=2,
+        retries=2,
+        retry_base_delay=0,
+        retry_max_delay=0,
+        client=FailingClient(),
+    )
+
+    assert result is None
+    assert calls == [
+        ("https://example.test/report.pdf", 2),
+        ("https://example.test/report.pdf", 2),
+    ]
+    assert sleeps == [0]
 
 
 def test_ensure_table_has_columns_adds_expected_columns():

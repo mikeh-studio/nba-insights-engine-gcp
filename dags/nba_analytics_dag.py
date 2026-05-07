@@ -60,6 +60,11 @@ def get_float_config(key: str, default: str) -> float:
         raise ValueError(f"{key} must be a number, got {value!r}") from exc
 
 
+def get_bool_config(key: str, default: str = "false") -> bool:
+    value = str(get_config(key, default) or "").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
 def get_nba_api_request_config() -> dict:
     return {
         "timeout": get_float_config("NBA_API_TIMEOUT_SECONDS", "15"),
@@ -329,6 +334,140 @@ def nba_analytics_pipeline():
             "season": season,
         }
 
+    @task(retries=2, retry_delay=timedelta(minutes=5))
+    def extract_injury_reports() -> dict:
+        """Fetch bounded official NBA injury report snapshots and land a CSV."""
+        import pandas as pd
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        season = SUPPORTED_SEASON
+        project_id = get_project_id()
+        bucket_name = get_config("GCS_BUCKET_NAME")
+        location = get_config("BQ_LOCATION", "US")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        metadata_dataset = get_dataset("BQ_METADATA_DATASET", "nba_metadata")
+        max_reports = get_int_config("NBA_INJURY_REPORT_MAX_REPORTS", "21")
+        replay_days = get_int_config("NBA_INJURY_REPORT_REPLAY_DAYS", "2")
+
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{bronze_dataset}", location)
+        pipeline.ensure_dataset(client, f"{project_id}.{metadata_dataset}", location)
+        state_table = f"{project_id}.{metadata_dataset}.ingestion_state"
+        run_table = f"{project_id}.{metadata_dataset}.pipeline_run_log"
+        pipeline.create_metadata_tables(client, state_table, run_table)
+        state = pipeline.get_ingestion_state(
+            client,
+            state_table,
+            source_system=pipeline.INJURY_REPORT_SOURCE_SYSTEM,
+            season=season,
+        )
+
+        watermark_before = (
+            state["watermark_date"].isoformat() if state["watermark_date"] else None
+        )
+        if not get_bool_config("NBA_ENABLE_INJURY_REPORTS", "true"):
+            return {
+                "domain": "injury_reports",
+                "gcs_uri": "",
+                "row_count": 0,
+                "candidate_count": 0,
+                "season": season,
+                "watermark_before": watermark_before,
+                "watermark_after": watermark_before,
+            }
+
+        end_date = pipeline.coerce_to_date(get_config("NBA_INJURY_REPORT_END_DATE"))
+        if end_date is None:
+            end_date = pd.Timestamp.now(tz="America/New_York").date()
+
+        if state["watermark_date"]:
+            start_date = pipeline.compute_replay_start(
+                state["watermark_date"], replay_days=replay_days
+            )
+        else:
+            start_date = pipeline.coerce_to_date(
+                get_config("NBA_INJURY_REPORT_START_DATE")
+            )
+            if start_date is None:
+                rolling_start = end_date - timedelta(days=max(max_reports, 1) - 1)
+                start_date = max(pipeline.DEFAULT_PLAYOFF_BACKFILL_START, rolling_start)
+
+        report_times = [
+            value.strip()
+            for value in str(
+                get_config(
+                    "NBA_INJURY_REPORT_TIMES_ET",
+                    pipeline.DEFAULT_INJURY_REPORT_TIME_ET,
+                )
+            ).split(",")
+            if value.strip()
+        ]
+        candidates = pipeline.build_injury_report_candidates(
+            start_date=start_date,
+            end_date=end_date,
+            report_times_et=report_times,
+            max_reports=max_reports,
+        )
+        if not candidates:
+            return {
+                "domain": "injury_reports",
+                "gcs_uri": "",
+                "row_count": 0,
+                "candidate_count": 0,
+                "season": season,
+                "watermark_before": watermark_before,
+                "watermark_after": watermark_before,
+            }
+
+        injury_df = pipeline.get_all_official_injury_reports(
+            candidates,
+            season=season,
+            delay=get_float_config("NBA_INJURY_REPORT_DELAY_SECONDS", "0.25"),
+            **get_nba_api_request_config(),
+        )
+        candidate_watermark_date = max(
+            candidate["report_date"] for candidate in candidates
+        )
+        watermark_before_date = pipeline.coerce_to_date(watermark_before)
+        if watermark_before_date and candidate_watermark_date < watermark_before_date:
+            candidate_watermark_date = watermark_before_date
+        candidate_watermark = candidate_watermark_date.isoformat()
+        if injury_df.empty:
+            logger.info("No official injury report rows returned for candidates")
+            return {
+                "domain": "injury_reports",
+                "gcs_uri": "",
+                "row_count": 0,
+                "candidate_count": len(candidates),
+                "season": season,
+                "watermark_before": watermark_before,
+                "watermark_after": candidate_watermark,
+            }
+
+        watermark_after = pipeline.coerce_to_date(injury_df["REPORT_DATE"].max())
+        run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
+        min_date = pd.to_datetime(injury_df["REPORT_DATE"]).min().strftime("%Y%m%d")
+        max_date = pd.to_datetime(injury_df["REPORT_DATE"]).max().strftime("%Y%m%d")
+        blob_path = (
+            f"nba_data/{season}/landing/"
+            f"{run_stamp}_{min_date}_{max_date}_injury_reports.csv"
+        )
+        gcs_uri = pipeline.upload_df_to_gcs(
+            injury_df, project_id, bucket_name, blob_path
+        )
+        return {
+            "domain": "injury_reports",
+            "gcs_uri": gcs_uri,
+            "row_count": len(injury_df),
+            "candidate_count": len(candidates),
+            "season": season,
+            "watermark_before": watermark_before,
+            "watermark_after": watermark_after.isoformat()
+            if watermark_after
+            else watermark_before,
+        }
+
     @task(retries=2, retry_delay=timedelta(minutes=2))
     def load_game_log_staging(extract_result: dict) -> dict:
         """Load landed game log rows to staging."""
@@ -483,6 +622,49 @@ def nba_analytics_pipeline():
             "gcs_uri": extract_result["gcs_uri"],
         }
 
+    @task(retries=2, retry_delay=timedelta(minutes=2))
+    def load_injury_report_staging(extract_result: dict) -> dict:
+        """Load landed official injury report rows to staging."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        location = get_config("BQ_LOCATION", "US")
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        client = bq.Client(project=project_id)
+        pipeline.ensure_dataset(client, f"{project_id}.{bronze_dataset}", location)
+        staging_table = f"{project_id}.{bronze_dataset}.stg_player_injury_reports"
+
+        if extract_result["row_count"] == 0:
+            return {
+                "domain": "injury_reports",
+                "staging_table": staging_table,
+                "row_count": 0,
+                "candidate_count": extract_result.get("candidate_count", 0),
+                "season": extract_result["season"],
+                "watermark_before": extract_result.get("watermark_before"),
+                "watermark_after": extract_result.get("watermark_after"),
+                "gcs_uri": extract_result["gcs_uri"],
+            }
+
+        pipeline.load_gcs_to_bigquery(
+            client,
+            extract_result["gcs_uri"],
+            staging_table,
+            pipeline.get_injury_report_schema(),
+            write_disposition=bq.WriteDisposition.WRITE_TRUNCATE,
+        )
+        return {
+            "domain": "injury_reports",
+            "staging_table": staging_table,
+            "row_count": extract_result["row_count"],
+            "candidate_count": extract_result.get("candidate_count", 0),
+            "season": extract_result["season"],
+            "watermark_before": extract_result.get("watermark_before"),
+            "watermark_after": extract_result.get("watermark_after"),
+            "gcs_uri": extract_result["gcs_uri"],
+        }
+
     @task(retries=0)
     def dq_game_log_staging(load_result: dict) -> dict:
         """Run hard DQ checks for game logs unless the run is a no-op."""
@@ -550,6 +732,24 @@ def nba_analytics_pipeline():
         load_result["dq_results"] = pipeline.run_player_reference_quality_checks(
             client,
             load_result["staging_table"],
+        )
+        return load_result
+
+    @task(retries=0)
+    def dq_injury_report_staging(load_result: dict) -> dict:
+        """Run DQ checks for official injury report rows."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        if load_result["row_count"] == 0:
+            load_result["dq_results"] = {}
+            return load_result
+
+        client = bq.Client(project=get_project_id())
+        load_result["dq_results"] = pipeline.run_injury_report_quality_checks(
+            client,
+            load_result["staging_table"],
+            season=SUPPORTED_SEASON,
         )
         return load_result
 
@@ -743,12 +943,66 @@ def nba_analytics_pipeline():
             "reconciliation": reconciliation,
         }
 
+    @task(retries=1, retry_delay=timedelta(minutes=2))
+    def merge_injury_reports(load_result: dict) -> dict:
+        """Merge staged official injury report rows into the bronze raw table."""
+        from google.cloud import bigquery as bq
+        import nba_pipeline as pipeline
+
+        project_id = get_project_id()
+        bronze_dataset = get_dataset("BQ_DATASET_BRONZE", "nba_bronze")
+        raw_table = f"{project_id}.{bronze_dataset}.raw_player_injury_reports"
+
+        if load_result["row_count"] == 0:
+            return {
+                "domain": "injury_reports",
+                "raw_table": raw_table,
+                "rows_loaded": 0,
+                "rows_inserted": 0,
+                "rows_updated": 0,
+                "candidate_count": load_result.get("candidate_count", 0),
+                "season": load_result["season"],
+                "gcs_uri": load_result["gcs_uri"],
+                "watermark_before": load_result.get("watermark_before"),
+                "watermark_after": load_result.get("watermark_after"),
+                "dq_results": load_result.get("dq_results", {}),
+            }
+
+        client = bq.Client(project=project_id)
+        result = pipeline.create_and_merge_injury_report_table(
+            client, load_result["staging_table"], raw_table
+        )
+        reconciliation = pipeline.validate_merge_reconciliation(
+            domain="injury_reports",
+            rows_loaded=load_result["row_count"],
+            pre_count=result["pre_count"],
+            post_count=result["post_count"],
+            inserted=result["inserted"],
+            updated=result["updated"],
+        )
+        return {
+            "domain": "injury_reports",
+            "raw_table": raw_table,
+            "rows_loaded": load_result["row_count"],
+            "rows_inserted": result["inserted"],
+            "rows_updated": result["updated"],
+            "rows_unchanged": reconciliation["unchanged"],
+            "candidate_count": load_result.get("candidate_count", 0),
+            "season": load_result["season"],
+            "gcs_uri": load_result["gcs_uri"],
+            "watermark_before": load_result.get("watermark_before"),
+            "watermark_after": load_result.get("watermark_after"),
+            "dq_results": load_result.get("dq_results", {}),
+            "reconciliation": reconciliation,
+        }
+
     @task(retries=0)
     def combine_pipeline_results(
         game_result: dict,
         schedule_result: dict,
         line_score_result: dict,
         player_reference_result: dict,
+        injury_report_result: dict,
         bootstrap_result: dict | None = None,
     ) -> dict:
         """Combine per-domain results into a single warehouse build context."""
@@ -784,13 +1038,24 @@ def nba_analytics_pipeline():
                 schedule_result.get("gcs_uri", ""),
                 line_score_result.get("gcs_uri", ""),
                 player_reference_result.get("gcs_uri", ""),
+                injury_report_result.get("gcs_uri", ""),
             ]
             if value
         ]
+        core_warehouse_changed = any(
+            [
+                game_result["rows_loaded"] > 0,
+                schedule_result["rows_loaded"] > 0,
+                line_score_result["rows_loaded"] > 0,
+                player_reference_result["rows_loaded"] > 0,
+            ]
+        )
         return {
             "season": game_result["season"],
             "watermark_before": game_result.get("watermark_before"),
             "watermark_after": game_result.get("watermark_after"),
+            "injury_watermark_before": injury_report_result.get("watermark_before"),
+            "injury_watermark_after": injury_report_result.get("watermark_after"),
             "gcs_uri": ",".join(all_gcs),
             "rows_loaded": game_result["rows_loaded"],
             "rows_inserted": game_result["rows_inserted"],
@@ -810,26 +1075,36 @@ def nba_analytics_pipeline():
             "player_reference_rows_unchanged": player_reference_result.get(
                 "rows_unchanged", 0
             ),
+            "injury_report_rows_loaded": injury_report_result["rows_loaded"],
+            "injury_report_rows_inserted": injury_report_result["rows_inserted"],
+            "injury_report_rows_updated": injury_report_result["rows_updated"],
+            "injury_report_rows_unchanged": injury_report_result.get(
+                "rows_unchanged", 0
+            ),
+            "injury_report_candidate_count": injury_report_result.get(
+                "candidate_count", 0
+            ),
             "dq_results": {
                 "game_logs": game_result.get("dq_results", {}),
                 "schedule": schedule_result.get("dq_results", {}),
                 "game_line_scores": line_score_result.get("dq_results", {}),
                 "player_reference": player_reference_result.get("dq_results", {}),
+                "injury_reports": injury_report_result.get("dq_results", {}),
             },
             "reconciliation": {
                 "game_logs": game_result.get("reconciliation", {}),
                 "schedule": schedule_result.get("reconciliation", {}),
                 "game_line_scores": line_score_result.get("reconciliation", {}),
                 "player_reference": player_reference_result.get("reconciliation", {}),
+                "injury_reports": injury_report_result.get("reconciliation", {}),
             },
             "bronze_bootstrap": bootstrap_result or {},
             "bronze_bootstrap_summary": bootstrap_summary,
+            "core_warehouse_changed": core_warehouse_changed,
             "should_build": any(
                 [
-                    game_result["rows_loaded"] > 0,
-                    schedule_result["rows_loaded"] > 0,
-                    line_score_result["rows_loaded"] > 0,
-                    player_reference_result["rows_loaded"] > 0,
+                    core_warehouse_changed,
+                    injury_report_result["rows_loaded"] > 0,
                 ]
             ),
         }
@@ -879,11 +1154,15 @@ def nba_analytics_pipeline():
         if not merge_result["should_build"]:
             logger.info("Skipping dbt build because no source domain produced rows")
             merge_result["dbt_status"] = "skipped"
+            merge_result["dbt_build_scope"] = "skipped"
             return merge_result
 
         repo_root = get_dbt_repo_root()
         profiles_dir = repo_root / "dbt" / "profiles"
         target = get_config("DBT_TARGET", "dev")
+        injury_only_build = merge_result.get(
+            "injury_report_rows_loaded", 0
+        ) > 0 and not merge_result.get("core_warehouse_changed", False)
         command = [
             "dbt",
             "build",
@@ -897,6 +1176,18 @@ def nba_analytics_pipeline():
             "source:gold_runtime.analysis_snapshots",
             "path:dbt/tests/no_duplicate_analysis_snapshots.sql",
         ]
+        if injury_only_build:
+            # Keep the global runtime excludes even for the targeted injury build;
+            # dbt applies --select and --exclude together, and these exclusions
+            # are intentionally outside the injury model/test selector.
+            command.extend(
+                [
+                    "--select",
+                    "stg_player_injury_reports_clean",
+                    "player_availability_current",
+                ]
+            )
+        merge_result["dbt_build_scope"] = "injury_only" if injury_only_build else "full"
 
         env = os.environ.copy()
         env.setdefault("BQ_PROJECT", get_project_id())
@@ -1140,6 +1431,16 @@ def nba_analytics_pipeline():
                 season=run_result["season"],
                 watermark_date=run_result["watermark_after"],
             )
+        if run_result.get("injury_report_candidate_count", 0) > 0 and run_result.get(
+            "injury_watermark_after"
+        ):
+            pipeline.upsert_ingestion_state(
+                client,
+                state_table,
+                season=run_result["season"],
+                watermark_date=run_result["injury_watermark_after"],
+                source_system=pipeline.INJURY_REPORT_SOURCE_SYSTEM,
+            )
 
         record = pipeline.build_run_metadata_record(
             dag_run_id=context["run_id"],
@@ -1151,6 +1452,7 @@ def nba_analytics_pipeline():
                 + run_result.get("schedule_rows_loaded", 0)
                 + run_result.get("line_score_rows_loaded", 0)
                 + run_result.get("player_reference_rows_loaded", 0)
+                + run_result.get("injury_report_rows_loaded", 0)
             ),
             rows_loaded=run_result["rows_loaded"],
             rows_inserted=run_result["rows_inserted"],
@@ -1161,6 +1463,7 @@ def nba_analytics_pipeline():
             finished_at_utc=datetime.now(tz=context["data_interval_start"].tzinfo),
             details=(
                 f"dbt_status={run_result.get('dbt_status', 'unknown')};"
+                f"dbt_build_scope={run_result.get('dbt_build_scope', 'unknown')};"
                 f"similarity_status={run_result.get('similarity_status', 'unknown')};"
                 f"similarity_player_count={run_result.get('similarity_player_count', 0)};"
                 f"similarity_archetype_count={run_result.get('similarity_archetype_count', 0)};"
@@ -1169,6 +1472,11 @@ def nba_analytics_pipeline():
                 f"schedule_rows_loaded={run_result.get('schedule_rows_loaded', 0)};"
                 f"line_score_rows_loaded={run_result.get('line_score_rows_loaded', 0)};"
                 f"player_reference_rows_loaded={run_result.get('player_reference_rows_loaded', 0)};"
+                f"injury_report_rows_loaded={run_result.get('injury_report_rows_loaded', 0)};"
+                f"injury_report_rows_inserted={run_result.get('injury_report_rows_inserted', 0)};"
+                f"injury_report_rows_updated={run_result.get('injury_report_rows_updated', 0)};"
+                f"injury_report_rows_unchanged={run_result.get('injury_report_rows_unchanged', 0)};"
+                f"injury_report_candidate_count={run_result.get('injury_report_candidate_count', 0)};"
                 f"rows_unchanged={run_result.get('rows_unchanged', 0)};"
                 f"schedule_rows_unchanged={run_result.get('schedule_rows_unchanged', 0)};"
                 f"line_score_rows_unchanged={run_result.get('line_score_rows_unchanged', 0)};"
@@ -1186,21 +1494,25 @@ def nba_analytics_pipeline():
     extracted_schedule = extract_schedule_context()
     extracted_line_scores = extract_game_line_scores(extracted)
     extracted_player_reference = extract_player_reference()
+    extracted_injury_reports = extract_injury_reports()
 
     staged = load_game_log_staging(extracted)
     staged_schedule = load_schedule_staging(extracted_schedule)
     staged_line_scores = load_game_line_score_staging(extracted_line_scores)
     staged_player_reference = load_player_reference_staging(extracted_player_reference)
+    staged_injury_reports = load_injury_report_staging(extracted_injury_reports)
 
     checked = dq_game_log_staging(staged)
     checked_schedule = dq_schedule_staging(staged_schedule)
     checked_line_scores = dq_game_line_score_staging(staged_line_scores)
     checked_player_reference = dq_player_reference_staging(staged_player_reference)
+    checked_injury_reports = dq_injury_report_staging(staged_injury_reports)
 
     merged = merge_game_logs(checked)
     merged_schedule = merge_schedule_context(checked_schedule)
     merged_line_scores = merge_game_line_scores(checked_line_scores)
     merged_player_reference = merge_player_reference(checked_player_reference)
+    merged_injury_reports = merge_injury_reports(checked_injury_reports)
 
     @task.branch(retries=0)
     def check_redshift_enabled(combined_result: dict) -> str:
@@ -1363,6 +1675,7 @@ def nba_analytics_pipeline():
         merged_schedule,
         merged_line_scores,
         merged_player_reference,
+        merged_injury_reports,
         bootstrapped_bronze,
     )
 

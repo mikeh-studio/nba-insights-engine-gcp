@@ -4,7 +4,7 @@ Production-style NBA data pipeline and public NBA stats workbench for the `2025-
 
 The v1 target architecture is:
 
-`NBA API -> GCS landing -> BigQuery bronze -> dbt silver/gold -> player similarity + archetypes -> deterministic analysis snapshots -> Cloud Run site/API`
+`NBA API + official NBA injury reports -> GCS landing -> BigQuery bronze -> dbt silver/gold -> player similarity + archetypes -> deterministic analysis snapshots -> Cloud Run site/API`
 
 With optional Redshift sync:
 
@@ -22,7 +22,7 @@ Core decisions for this version:
 - The operational scope is fixed to season `2025-26`.
 - Claude/Anthropic is not part of the v1 runtime path.
 - Analysis output is deterministic and template-based, not LLM-generated.
-- Supporting context now includes upcoming schedule, team line scores, and player reference attributes; injury-report ingestion is still not part of the current runtime path.
+- Supporting context now includes upcoming schedule, team line scores, player reference attributes, and official NBA injury report snapshots. Media sentiment ingestion is intentionally deferred until source, cost, and retention rules are explicit.
 
 ## Pipeline Flow
 
@@ -33,13 +33,14 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 3. Derive the replay-window `game_id` set and fetch team line scores for those games.
 4. Fetch active-player reference attributes and roster context.
 5. Fetch the upcoming schedule window from `nba_api`.
-6. Land all four domains in GCS and load them into bronze staging tables.
-7. Run DQ checks for game logs, line scores, player reference, and schedule context.
-8. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, and `bronze.raw_schedule`, then validate merge reconciliation against loaded and inserted/updated counts.
-9. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
-10. Build player similarity vectors and archetype clusters from `gold.player_similarity_feature_input`, then publish `gold.player_similarity_features` and `gold.player_archetypes`.
-11. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
-12. Publish watermark and run metadata to `nba_metadata`.
+6. Fetch a capped set of official NBA injury report PDFs, defaulting to the 2026 playoff window on first run and a small replay window after watermarking.
+7. Land all five domains in GCS and load them into bronze staging tables.
+8. Run DQ checks for game logs, line scores, player reference, schedule context, and injury reports.
+9. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, `bronze.raw_schedule`, and `bronze.raw_player_injury_reports`, then validate merge reconciliation against loaded and inserted/updated counts.
+10. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
+11. Build player similarity vectors and archetype clusters from `gold.player_similarity_feature_input`, then publish `gold.player_similarity_features` and `gold.player_archetypes`.
+12. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
+13. Publish watermark and run metadata to `nba_metadata`.
 
 ## Optional Redshift Secondary Warehouse
 
@@ -155,6 +156,13 @@ NBA_API_RETRY_BASE_DELAY_SECONDS=1.0
 NBA_API_RETRY_BACKOFF_MULTIPLIER=2.0
 NBA_API_RETRY_MAX_DELAY_SECONDS=8.0
 NBA_BRONZE_BOOTSTRAP_MODE=auto
+NBA_ENABLE_INJURY_REPORTS=true
+NBA_INJURY_REPORT_START_DATE=2026-04-18
+NBA_INJURY_REPORT_END_DATE=
+NBA_INJURY_REPORT_MAX_REPORTS=21
+NBA_INJURY_REPORT_REPLAY_DAYS=2
+NBA_INJURY_REPORT_TIMES_ET=05_00PM
+NBA_INJURY_REPORT_DELAY_SECONDS=0.25
 AIRFLOW_LIVE_VALIDATE_TIMEOUT_SECONDS=7200
 AIRFLOW_LIVE_VALIDATE_POLL_SECONDS=30
 AIRFLOW_LIVE_VALIDATE_RUN_DBT=true
@@ -235,6 +243,20 @@ Bronze bootstrap behavior is controlled by `NBA_BRONZE_BOOTSTRAP_MODE`:
 NBA API timeout and retry behavior is controlled by `NBA_API_TIMEOUT_SECONDS`,
 `NBA_API_RETRIES`, `NBA_API_RETRY_BASE_DELAY_SECONDS`,
 `NBA_API_RETRY_BACKOFF_MULTIPLIER`, and `NBA_API_RETRY_MAX_DELAY_SECONDS`.
+
+Official injury-report ingestion is bounded by `NBA_INJURY_REPORT_MAX_REPORTS`,
+`NBA_INJURY_REPORT_TIMES_ET`, and `NBA_INJURY_REPORT_REPLAY_DAYS`. The default
+first-run window starts at `2026-04-18` for playoff backfill and then advances
+with a separate injury-report watermark, which keeps repeated runs from fetching
+or loading a large historical range. The injury watermark advances after a
+bounded candidate batch is checked, even if the official PDFs are not published
+yet, but metadata persistence keeps the maximum existing watermark so replay
+or manually bounded runs cannot move it backward. The replay window still
+refetches recent report dates for late updates.
+When injury reports are the only changed domain, the DAG runs a targeted dbt
+build for injury availability models instead of rebuilding the full warehouse.
+`gold.player_availability_current` includes `is_report_stale` so consumers can
+separate current availability signals from older report appearances.
 Game logs remain the hard-gated source; schedule, line-score, and player-reference
 timeouts soft-fail after retries so the bronze bootstrap path can keep the core
 contract moving when `raw_game_logs` already has rows.
