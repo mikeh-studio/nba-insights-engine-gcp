@@ -34,13 +34,37 @@ The Airflow DAG in `dags/nba_analytics_dag.py` runs this path:
 4. Fetch active-player reference attributes and roster context.
 5. Fetch the upcoming schedule window from `nba_api`.
 6. Fetch a capped set of official NBA injury report PDFs, defaulting to the 2026 playoff window on first run and a small replay window after watermarking.
-7. Land all five domains in GCS and load them into bronze staging tables.
-8. Run DQ checks for game logs, line scores, player reference, schedule context, and injury reports.
-9. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, `bronze.raw_schedule`, and `bronze.raw_player_injury_reports`, then validate merge reconciliation against loaded and inserted/updated counts.
-10. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
-11. Build player similarity vectors and archetype clusters from `gold.player_similarity_feature_input`, then publish `gold.player_similarity_features` and `gold.player_archetypes`.
-12. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
-13. Publish watermark and run metadata to `nba_metadata`.
+7. Validate source contracts for all non-empty extracted domains before landing.
+8. Land all five domains in GCS and load them into bronze staging tables.
+9. Run DQ checks for game logs, line scores, player reference, schedule context, and injury reports.
+10. Merge into `bronze.raw_game_logs`, `bronze.raw_game_line_scores`, `bronze.raw_player_reference`, `bronze.raw_schedule`, and `bronze.raw_player_injury_reports`, then validate merge reconciliation against loaded and inserted/updated counts.
+11. Run dbt bronze/silver/gold models and tests for the public stats-serving layer.
+12. Build player similarity vectors and archetype clusters from `gold.player_similarity_feature_input`, then publish `gold.player_similarity_features` and `gold.player_archetypes`.
+13. Build a deterministic `analysis_snapshots` record from leaderboard, trend, ranking, recommendation, scoring-contribution, and player-context outputs.
+14. Publish watermark and run metadata to `nba_metadata`.
+
+## Source Contracts
+
+Source contracts live under `contracts/` and are enforced in the Airflow extract
+tasks before non-empty dataframes are uploaded to GCS. They define required
+columns, expected types, business keys, season/date scope, enum values, and
+domain-specific bounds for:
+
+- `game_logs`
+- `game_line_scores`
+- `schedule`
+- `player_reference`
+- `injury_reports`
+
+Contract severities:
+
+- `fatal`: stop the pipeline before landing the batch.
+- `quarantine`: remove the violating rows and continue if valid rows remain.
+- `warning`: record the issue without dropping rows.
+
+The source contract layer protects the ingestion boundary. The existing BigQuery
+staging DQ checks and dbt tests still run after landing to protect warehouse
+state and modeled outputs.
 
 ## Optional Redshift Secondary Warehouse
 

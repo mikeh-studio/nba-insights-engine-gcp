@@ -1,0 +1,82 @@
+domain: game_line_scores
+source: nba_api_boxscore_summary
+version: 1
+grain: one row per team per game
+business_key:
+  - GAME_ID
+  - TEAM_ID
+type_validation_severity: quarantine
+columns:
+  GAME_DATE: date
+  GAME_ID: string
+  SEASON: string
+  TEAM_ID: int64
+  TEAM_ABBR: string
+  TEAM_CITY_NAME: string
+  TEAM_NICKNAME: string
+  TEAM_WINS_LOSSES: string
+  PTS_QTR1: int64
+  PTS_QTR2: int64
+  PTS_QTR3: int64
+  PTS_QTR4: int64
+  PTS_OT1: int64
+  PTS_OT2: int64
+  PTS_OT3: int64
+  PTS_OT4: int64
+  PTS_OT5: int64
+  PTS_OT6: int64
+  PTS_OT7: int64
+  PTS_OT8: int64
+  PTS_OT9: int64
+  PTS_OT10: int64
+  PTS: int64
+  INGESTED_AT_UTC: timestamp
+rules:
+  - name: business_key_not_null
+    check: not_null
+    columns: [GAME_ID, TEAM_ID, TEAM_ABBR]
+    severity: fatal
+  - name: business_key_unique
+    check: unique_key
+    columns: [GAME_ID, TEAM_ID]
+    severity: fatal
+  - name: season_scope
+    check: equals
+    column: SEASON
+    value: "2025-26"
+    severity: fatal
+  - name: game_date_supported_window
+    check: date_between
+    column: GAME_DATE
+    min: "2025-07-01"
+    max: "2026-06-30"
+    severity: fatal
+  - name: one_home_and_away_team_per_game
+    check: group_count
+    columns: [GAME_ID]
+    expected: 2
+    severity: fatal
+  - name: valid_team_abbr
+    check: in_set
+    column: TEAM_ABBR
+    values: [ATL, BOS, BKN, CHA, CHI, CLE, DAL, DEN, DET, GSW, HOU, IND, LAC, LAL, MEM, MIA, MIL, MIN, NOP, NYK, OKC, ORL, PHI, PHX, POR, SAC, SAS, TOR, UTA, WAS]
+    severity: fatal
+  - name: point_total_bounds
+    check: between
+    column: PTS
+    min: 0
+    max: 250
+    allow_null: false
+    severity: quarantine
+  - name: quarter_point_bounds
+    check: between
+    columns: [PTS_QTR1, PTS_QTR2, PTS_QTR3, PTS_QTR4, PTS_OT1, PTS_OT2, PTS_OT3, PTS_OT4, PTS_OT5, PTS_OT6, PTS_OT7, PTS_OT8, PTS_OT9, PTS_OT10]
+    min: 0
+    max: 100
+    allow_null: true
+    severity: quarantine
+  - name: total_matches_period_sum
+    check: sum_equals
+    target_column: PTS
+    columns: [PTS_QTR1, PTS_QTR2, PTS_QTR3, PTS_QTR4, PTS_OT1, PTS_OT2, PTS_OT3, PTS_OT4, PTS_OT5, PTS_OT6, PTS_OT7, PTS_OT8, PTS_OT9, PTS_OT10]
+    severity: quarantine

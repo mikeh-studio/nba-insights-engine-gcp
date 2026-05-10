@@ -1,0 +1,72 @@
+domain: injury_reports
+source: nba_official_injury_report
+version: 1
+grain: one row per player per official report snapshot
+business_key:
+  - REPORT_TIMESTAMP_UTC
+  - GAME_DATE
+  - MATCHUP
+  - TEAM_ABBR
+  - PLAYER_NAME_SOURCE
+type_validation_severity: quarantine
+columns:
+  REPORT_DATE: date
+  REPORT_TIME_ET: string
+  REPORT_TIMESTAMP_UTC: timestamp
+  GAME_DATE: date
+  GAME_TIME_ET: string
+  MATCHUP: string
+  SEASON: string
+  TEAM_ABBR: string
+  TEAM_NAME: string
+  PLAYER_ID: int64
+  PLAYER_NAME: string
+  PLAYER_NAME_SOURCE: string
+  INJURY_STATUS: string
+  REASON: string
+  SOURCE_URL: string
+  SOURCE_SYSTEM: string
+  INGESTED_AT_UTC: timestamp
+rules:
+  - name: business_key_not_null
+    check: not_null
+    columns: [REPORT_DATE, REPORT_TIMESTAMP_UTC, GAME_DATE, MATCHUP, TEAM_ABBR, PLAYER_NAME_SOURCE, INJURY_STATUS]
+    severity: fatal
+  - name: business_key_unique
+    check: unique_key
+    columns: [REPORT_TIMESTAMP_UTC, GAME_DATE, MATCHUP, TEAM_ABBR, PLAYER_NAME_SOURCE]
+    severity: fatal
+  - name: season_scope
+    check: equals
+    column: SEASON
+    value: "2025-26"
+    severity: fatal
+  - name: game_date_supported_window
+    check: date_between
+    column: GAME_DATE
+    min: "2025-07-01"
+    max: "2026-06-30"
+    severity: fatal
+  - name: valid_team_abbr
+    check: in_set
+    column: TEAM_ABBR
+    values: [ATL, BOS, BKN, CHA, CHI, CLE, DAL, DEN, DET, GSW, HOU, IND, LAC, LAL, MEM, MIA, MIL, MIN, NOP, NYK, OKC, ORL, PHI, PHX, POR, SAC, SAS, TOR, UTA, WAS]
+    severity: fatal
+  - name: valid_injury_status
+    check: in_set
+    column: INJURY_STATUS
+    values: [Available, Probable, Questionable, Doubtful, Out]
+    severity: fatal
+  - name: source_system
+    check: equals
+    column: SOURCE_SYSTEM
+    value: nba_official_injury_report
+    severity: fatal
+  - name: source_url_present
+    check: not_blank
+    columns: [SOURCE_URL]
+    severity: fatal
+  - name: player_match_coverage
+    check: not_null
+    columns: [PLAYER_ID]
+    severity: warning

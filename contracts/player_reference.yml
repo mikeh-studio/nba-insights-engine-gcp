@@ -1,0 +1,67 @@
+domain: player_reference
+source: nba_api_common_player_info
+version: 1
+grain: one row per active player
+business_key:
+  - PLAYER_ID
+type_validation_severity: quarantine
+columns:
+  PLAYER_ID: int64
+  FIRST_NAME: string
+  LAST_NAME: string
+  PLAYER_NAME: string
+  PLAYER_SLUG: string
+  BIRTHDATE: date
+  SCHOOL: string
+  COUNTRY: string
+  LAST_AFFILIATION: string
+  HEIGHT: string
+  WEIGHT: int64
+  SEASON_EXP: int64
+  JERSEY: string
+  POSITION: string
+  ROSTER_STATUS: bool
+  TEAM_ID: int64
+  TEAM_NAME: string
+  TEAM_ABBR: string
+  TEAM_CODE: string
+  TEAM_CITY: string
+  FROM_YEAR: int64
+  TO_YEAR: int64
+  DRAFT_YEAR: string
+  DRAFT_ROUND: string
+  DRAFT_NUMBER: string
+  INGESTED_AT_UTC: timestamp
+rules:
+  - name: business_key_not_null
+    check: not_null
+    columns: [PLAYER_ID]
+    severity: fatal
+  - name: business_key_unique
+    check: unique_key
+    columns: [PLAYER_ID]
+    severity: fatal
+  - name: player_name_present
+    check: not_blank
+    columns: [PLAYER_NAME]
+    severity: fatal
+  - name: active_roster_team_abbr_known
+    check: in_set
+    column: TEAM_ABBR
+    values: [ATL, BOS, BKN, CHA, CHI, CLE, DAL, DEN, DET, GSW, HOU, IND, LAC, LAL, MEM, MIA, MIL, MIN, NOP, NYK, OKC, ORL, PHI, PHX, POR, SAC, SAS, TOR, UTA, WAS]
+    allow_null: true
+    severity: warning
+  - name: player_weight_bounds
+    check: between
+    column: WEIGHT
+    min: 120
+    max: 400
+    allow_null: true
+    severity: warning
+  - name: season_exp_bounds
+    check: between
+    column: SEASON_EXP
+    min: 0
+    max: 30
+    allow_null: true
+    severity: warning

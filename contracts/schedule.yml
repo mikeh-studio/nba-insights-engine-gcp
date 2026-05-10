@@ -1,0 +1,54 @@
+domain: schedule
+source: nba_api_schedule
+version: 1
+grain: one row per team per scheduled game
+business_key:
+  - GAME_ID
+  - TEAM_ABBR
+type_validation_severity: quarantine
+columns:
+  SCHEDULE_DATE: date
+  GAME_ID: string
+  SEASON: string
+  TEAM_ABBR: string
+  OPPONENT_ABBR: string
+  HOME_AWAY: string
+  IS_BACK_TO_BACK: bool
+  GAME_STATUS: string
+  SOURCE_UPDATED_AT_UTC: timestamp
+  INGESTED_AT_UTC: timestamp
+rules:
+  - name: business_key_not_null
+    check: not_null
+    columns: [SCHEDULE_DATE, GAME_ID, TEAM_ABBR]
+    severity: fatal
+  - name: business_key_unique
+    check: unique_key
+    columns: [GAME_ID, TEAM_ABBR]
+    severity: fatal
+  - name: season_scope
+    check: equals
+    column: SEASON
+    value: "2025-26"
+    severity: fatal
+  - name: schedule_date_supported_window
+    check: date_between
+    column: SCHEDULE_DATE
+    min: "2025-07-01"
+    max: "2026-06-30"
+    severity: fatal
+  - name: one_home_and_away_team_per_game
+    check: group_count
+    columns: [GAME_ID]
+    expected: 2
+    severity: fatal
+  - name: valid_home_away
+    check: in_set
+    column: HOME_AWAY
+    values: [HOME, AWAY]
+    severity: fatal
+  - name: valid_team_abbr
+    check: in_set
+    columns: [TEAM_ABBR, OPPONENT_ABBR]
+    values: [ATL, BOS, BKN, CHA, CHI, CLE, DAL, DEN, DET, GSW, HOU, IND, LAC, LAL, MEM, MIA, MIL, MIN, NOP, NYK, OKC, ORL, PHI, PHX, POR, SAC, SAS, TOR, UTA, WAS]
+    severity: fatal

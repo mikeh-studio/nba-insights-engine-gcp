@@ -1,0 +1,92 @@
+domain: game_logs
+source: nba_api_player_game_logs
+version: 1
+grain: one row per player per game appearance
+business_key:
+  - PLAYER_ID
+  - GAME_DATE
+  - MATCHUP
+type_validation_severity: quarantine
+columns:
+  GAME_ID: string
+  GAME_DATE: date
+  MATCHUP: string
+  WL: string
+  MIN: float64
+  FGM: float64
+  FGA: float64
+  FG_PCT: float64
+  FG3M: float64
+  FG3A: float64
+  FG3_PCT: float64
+  FTM: float64
+  FTA: float64
+  FT_PCT: float64
+  OREB: float64
+  DREB: float64
+  PTS: int64
+  REB: int64
+  AST: int64
+  STL: int64
+  BLK: int64
+  TOV: int64
+  PF: int64
+  PLUS_MINUS: float64
+  SEASON: string
+  INGESTED_AT_UTC: timestamp
+  PLAYER_ID: int64
+  PLAYER_NAME: string
+rules:
+  - name: business_key_not_null
+    check: not_null
+    columns: [PLAYER_ID, GAME_DATE, MATCHUP]
+    severity: fatal
+  - name: business_key_unique
+    check: unique_key
+    columns: [PLAYER_ID, GAME_DATE, MATCHUP]
+    severity: fatal
+  - name: season_scope
+    check: equals
+    column: SEASON
+    value: "2025-26"
+    severity: fatal
+  - name: game_date_supported_window
+    check: date_between
+    column: GAME_DATE
+    min: "2025-07-01"
+    max: "2026-06-30"
+    severity: fatal
+  - name: wl_values
+    check: in_set
+    column: WL
+    values: ["W", "L"]
+    allow_null: true
+    severity: quarantine
+  - name: minutes_bounds
+    check: between
+    column: MIN
+    min: 0
+    max: 75
+    allow_null: true
+    severity: quarantine
+  - name: scoring_bounds
+    check: between
+    column: PTS
+    min: 0
+    max: 100
+    allow_null: true
+    severity: quarantine
+  - name: counting_stat_bounds
+    check: between
+    columns: [REB, AST, STL, BLK, TOV, PF, FGM, FGA, FG3M, FG3A, FTM, FTA, OREB, DREB]
+    min: 0
+    max: 75
+    allow_null: true
+    severity: quarantine
+  - name: percentage_bounds
+    check: between
+    columns: [FG_PCT, FG3_PCT, FT_PCT]
+    min: 0
+    max: 1
+    allow_null: true
+    severity: quarantine

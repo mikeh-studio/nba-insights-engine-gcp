@@ -77,6 +77,25 @@ def get_nba_api_request_config() -> dict:
     }
 
 
+def validate_source_contract_frame(contract_name: str, frame):
+    """Validate and optionally quarantine rows before GCS landing."""
+    from airflow.exceptions import AirflowFailException
+    import nba_source_contracts as source_contracts
+
+    try:
+        validation = source_contracts.validate_source_contract(contract_name, frame)
+    except source_contracts.SourceContractError as exc:
+        raise AirflowFailException(str(exc)) from exc
+    return validation.frame, validation.result
+
+
+def skipped_source_contract_result(contract_name: str, reason: str) -> dict:
+    """Build a no-op source contract result for empty extract paths."""
+    import nba_source_contracts as source_contracts
+
+    return source_contracts.skipped_contract_result(contract_name, reason=reason)
+
+
 def get_dbt_repo_root() -> Path:
     """Resolve the dbt project root in local Airflow-friendly layouts."""
     dag_file = Path(__file__).resolve()
@@ -170,6 +189,9 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "game_ids": [],
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "game_logs", "empty_after_incremental_filter"
+                ),
                 "watermark_before": state["watermark_date"].isoformat()
                 if state["watermark_date"]
                 else None,
@@ -178,6 +200,9 @@ def nba_analytics_pipeline():
                 else None,
             }
 
+        incremental_df, source_contract = validate_source_contract_frame(
+            "game_logs", incremental_df
+        )
         watermark_after = pipeline.coerce_to_date(incremental_df["GAME_DATE"].max())
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         min_date = incremental_df["GAME_DATE"].min().strftime("%Y%m%d")
@@ -204,6 +229,7 @@ def nba_analytics_pipeline():
                 }
             ),
             "season": season,
+            "source_contract": source_contract,
             "watermark_before": state["watermark_date"].isoformat()
             if state["watermark_date"]
             else None,
@@ -227,6 +253,9 @@ def nba_analytics_pipeline():
                 "gcs_uri": "",
                 "row_count": 0,
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "game_line_scores", "empty_changed_game_set"
+                ),
             }
 
         line_scores = pipeline.get_all_game_line_scores(
@@ -241,8 +270,14 @@ def nba_analytics_pipeline():
                 "gcs_uri": "",
                 "row_count": 0,
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "game_line_scores", "empty_source_response"
+                ),
             }
 
+        line_scores, source_contract = validate_source_contract_frame(
+            "game_line_scores", line_scores
+        )
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         min_date = pd.to_datetime(line_scores["GAME_DATE"]).min().strftime("%Y%m%d")
         max_date = pd.to_datetime(line_scores["GAME_DATE"]).max().strftime("%Y%m%d")
@@ -255,6 +290,7 @@ def nba_analytics_pipeline():
             "gcs_uri": gcs_uri,
             "row_count": len(line_scores),
             "season": season,
+            "source_contract": source_contract,
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=5))
@@ -279,8 +315,14 @@ def nba_analytics_pipeline():
                 "domain": "player_reference",
                 "gcs_uri": "",
                 "row_count": 0,
+                "source_contract": skipped_source_contract_result(
+                    "player_reference", "empty_source_response"
+                ),
             }
 
+        reference_df, source_contract = validate_source_contract_frame(
+            "player_reference", reference_df
+        )
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         blob_path = f"nba_data/reference/landing/{run_stamp}_player_reference.csv"
         gcs_uri = pipeline.upload_df_to_gcs(
@@ -290,6 +332,7 @@ def nba_analytics_pipeline():
             "domain": "player_reference",
             "gcs_uri": gcs_uri,
             "row_count": len(reference_df),
+            "source_contract": source_contract,
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=5))
@@ -316,8 +359,14 @@ def nba_analytics_pipeline():
                 "gcs_uri": "",
                 "row_count": 0,
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "schedule", "empty_lookahead_window"
+                ),
             }
 
+        schedule_df, source_contract = validate_source_contract_frame(
+            "schedule", schedule_df
+        )
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         min_date = schedule_df["SCHEDULE_DATE"].min().strftime("%Y%m%d")
         max_date = schedule_df["SCHEDULE_DATE"].max().strftime("%Y%m%d")
@@ -332,6 +381,7 @@ def nba_analytics_pipeline():
             "gcs_uri": gcs_uri,
             "row_count": len(schedule_df),
             "season": season,
+            "source_contract": source_contract,
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=5))
@@ -373,6 +423,9 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "candidate_count": 0,
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "injury_reports", "disabled"
+                ),
                 "watermark_before": watermark_before,
                 "watermark_after": watermark_before,
             }
@@ -416,6 +469,9 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "candidate_count": 0,
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "injury_reports", "no_candidates"
+                ),
                 "watermark_before": watermark_before,
                 "watermark_after": watermark_before,
             }
@@ -441,10 +497,16 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "candidate_count": len(candidates),
                 "season": season,
+                "source_contract": skipped_source_contract_result(
+                    "injury_reports", "empty_source_response"
+                ),
                 "watermark_before": watermark_before,
                 "watermark_after": candidate_watermark,
             }
 
+        injury_df, source_contract = validate_source_contract_frame(
+            "injury_reports", injury_df
+        )
         watermark_after = pipeline.coerce_to_date(injury_df["REPORT_DATE"].max())
         run_stamp = pd.Timestamp.now(tz="UTC").strftime("%Y%m%dT%H%M%SZ")
         min_date = pd.to_datetime(injury_df["REPORT_DATE"]).min().strftime("%Y%m%d")
@@ -462,6 +524,7 @@ def nba_analytics_pipeline():
             "row_count": len(injury_df),
             "candidate_count": len(candidates),
             "season": season,
+            "source_contract": source_contract,
             "watermark_before": watermark_before,
             "watermark_after": watermark_after.isoformat()
             if watermark_after
@@ -494,6 +557,7 @@ def nba_analytics_pipeline():
                 "watermark_before": extract_result["watermark_before"],
                 "watermark_after": extract_result["watermark_after"],
                 "gcs_uri": extract_result["gcs_uri"],
+                "source_contract": extract_result.get("source_contract", {}),
             }
 
         pipeline.load_gcs_to_bigquery(
@@ -511,6 +575,7 @@ def nba_analytics_pipeline():
             "watermark_before": extract_result["watermark_before"],
             "watermark_after": extract_result["watermark_after"],
             "gcs_uri": extract_result["gcs_uri"],
+            "source_contract": extract_result.get("source_contract", {}),
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
@@ -533,6 +598,7 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "season": extract_result["season"],
                 "gcs_uri": extract_result["gcs_uri"],
+                "source_contract": extract_result.get("source_contract", {}),
             }
 
         pipeline.load_gcs_to_bigquery(
@@ -548,6 +614,7 @@ def nba_analytics_pipeline():
             "row_count": extract_result["row_count"],
             "season": extract_result["season"],
             "gcs_uri": extract_result["gcs_uri"],
+            "source_contract": extract_result.get("source_contract", {}),
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
@@ -570,6 +637,7 @@ def nba_analytics_pipeline():
                 "row_count": 0,
                 "season": extract_result["season"],
                 "gcs_uri": extract_result["gcs_uri"],
+                "source_contract": extract_result.get("source_contract", {}),
             }
 
         pipeline.load_gcs_to_bigquery(
@@ -585,6 +653,7 @@ def nba_analytics_pipeline():
             "row_count": extract_result["row_count"],
             "season": extract_result["season"],
             "gcs_uri": extract_result["gcs_uri"],
+            "source_contract": extract_result.get("source_contract", {}),
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
@@ -606,6 +675,7 @@ def nba_analytics_pipeline():
                 "staging_table": staging_table,
                 "row_count": 0,
                 "gcs_uri": extract_result["gcs_uri"],
+                "source_contract": extract_result.get("source_contract", {}),
             }
 
         pipeline.load_gcs_to_bigquery(
@@ -620,6 +690,7 @@ def nba_analytics_pipeline():
             "staging_table": staging_table,
             "row_count": extract_result["row_count"],
             "gcs_uri": extract_result["gcs_uri"],
+            "source_contract": extract_result.get("source_contract", {}),
         }
 
     @task(retries=2, retry_delay=timedelta(minutes=2))
@@ -645,6 +716,7 @@ def nba_analytics_pipeline():
                 "watermark_before": extract_result.get("watermark_before"),
                 "watermark_after": extract_result.get("watermark_after"),
                 "gcs_uri": extract_result["gcs_uri"],
+                "source_contract": extract_result.get("source_contract", {}),
             }
 
         pipeline.load_gcs_to_bigquery(
@@ -663,6 +735,7 @@ def nba_analytics_pipeline():
             "watermark_before": extract_result.get("watermark_before"),
             "watermark_after": extract_result.get("watermark_after"),
             "gcs_uri": extract_result["gcs_uri"],
+            "source_contract": extract_result.get("source_contract", {}),
         }
 
     @task(retries=0)
@@ -775,6 +848,7 @@ def nba_analytics_pipeline():
                 "watermark_before": load_result["watermark_before"],
                 "watermark_after": load_result["watermark_after"],
                 "dq_results": load_result.get("dq_results", {}),
+                "source_contract": load_result.get("source_contract", {}),
             }
 
         client = bq.Client(project=project_id)
@@ -802,6 +876,7 @@ def nba_analytics_pipeline():
             "watermark_before": load_result["watermark_before"],
             "watermark_after": load_result["watermark_after"],
             "dq_results": load_result.get("dq_results", {}),
+            "source_contract": load_result.get("source_contract", {}),
         }
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
@@ -824,6 +899,7 @@ def nba_analytics_pipeline():
                 "season": load_result["season"],
                 "gcs_uri": load_result["gcs_uri"],
                 "dq_results": load_result.get("dq_results", {}),
+                "source_contract": load_result.get("source_contract", {}),
             }
 
         client = bq.Client(project=project_id)
@@ -849,6 +925,7 @@ def nba_analytics_pipeline():
             "season": load_result["season"],
             "gcs_uri": load_result["gcs_uri"],
             "dq_results": load_result.get("dq_results", {}),
+            "source_contract": load_result.get("source_contract", {}),
         }
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
@@ -871,6 +948,7 @@ def nba_analytics_pipeline():
                 "season": load_result["season"],
                 "gcs_uri": load_result["gcs_uri"],
                 "dq_results": load_result.get("dq_results", {}),
+                "source_contract": load_result.get("source_contract", {}),
             }
 
         client = bq.Client(project=project_id)
@@ -896,6 +974,7 @@ def nba_analytics_pipeline():
             "season": load_result["season"],
             "gcs_uri": load_result["gcs_uri"],
             "dq_results": load_result.get("dq_results", {}),
+            "source_contract": load_result.get("source_contract", {}),
         }
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
@@ -917,6 +996,7 @@ def nba_analytics_pipeline():
                 "rows_updated": 0,
                 "gcs_uri": load_result["gcs_uri"],
                 "dq_results": load_result.get("dq_results", {}),
+                "source_contract": load_result.get("source_contract", {}),
             }
 
         client = bq.Client(project=project_id)
@@ -941,6 +1021,7 @@ def nba_analytics_pipeline():
             "gcs_uri": load_result["gcs_uri"],
             "dq_results": load_result.get("dq_results", {}),
             "reconciliation": reconciliation,
+            "source_contract": load_result.get("source_contract", {}),
         }
 
     @task(retries=1, retry_delay=timedelta(minutes=2))
@@ -966,6 +1047,7 @@ def nba_analytics_pipeline():
                 "watermark_before": load_result.get("watermark_before"),
                 "watermark_after": load_result.get("watermark_after"),
                 "dq_results": load_result.get("dq_results", {}),
+                "source_contract": load_result.get("source_contract", {}),
             }
 
         client = bq.Client(project=project_id)
@@ -994,6 +1076,7 @@ def nba_analytics_pipeline():
             "watermark_after": load_result.get("watermark_after"),
             "dq_results": load_result.get("dq_results", {}),
             "reconciliation": reconciliation,
+            "source_contract": load_result.get("source_contract", {}),
         }
 
     @task(retries=0)
@@ -1090,6 +1173,13 @@ def nba_analytics_pipeline():
                 "game_line_scores": line_score_result.get("dq_results", {}),
                 "player_reference": player_reference_result.get("dq_results", {}),
                 "injury_reports": injury_report_result.get("dq_results", {}),
+            },
+            "source_contract_results": {
+                "game_logs": game_result.get("source_contract", {}),
+                "schedule": schedule_result.get("source_contract", {}),
+                "game_line_scores": line_score_result.get("source_contract", {}),
+                "player_reference": player_reference_result.get("source_contract", {}),
+                "injury_reports": injury_report_result.get("source_contract", {}),
             },
             "reconciliation": {
                 "game_logs": game_result.get("reconciliation", {}),
@@ -1483,6 +1573,7 @@ def nba_analytics_pipeline():
                 f"player_reference_rows_unchanged={run_result.get('player_reference_rows_unchanged', 0)};"
                 f"bronze_bootstrap={run_result.get('bronze_bootstrap_summary', {})};"
                 f"redshift_status={run_result.get('redshift_status', get_config('ENABLE_REDSHIFT', 'false'))};"
+                f"source_contracts={run_result.get('source_contract_results', {})};"
                 f"dq={run_result.get('dq_results', {})};"
                 f"reconciliation={run_result.get('reconciliation', {})}"
             ),
