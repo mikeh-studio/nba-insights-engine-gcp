@@ -848,6 +848,7 @@ def _test_settings(**overrides: object) -> Settings:
         "openai_agent_model": "gpt-5.4-mini",
         "openai_agent_enabled": True,
         "agent_max_tool_calls": 6,
+        "agent_rate_limit_per_minute": 12,
     }
     values.update(overrides)
     return Settings(**values)
@@ -1081,6 +1082,34 @@ def test_api_agent_ask_accepts_date_range_tool_args() -> None:
     properties = game_log_schema["parameters"]["properties"]
     assert properties["start_date"]["type"] == ["string", "null"]
     assert properties["end_date"]["type"] == ["string", "null"]
+
+
+def test_api_agent_ask_rate_limits_repeated_public_calls() -> None:
+    fake_openai = FakeOpenAIClient()
+    client = build_client(
+        settings=_test_settings(
+            openai_api_key="test-key",
+            agent_rate_limit_per_minute=1,
+        ),
+        agent_client=fake_openai,
+    )
+    headers = {"X-Forwarded-For": "198.51.100.23"}
+
+    first = client.post(
+        "/api/agent/ask",
+        json={"question": "How is Tyrese Maxey trending?"},
+        headers=headers,
+    )
+    second = client.post(
+        "/api/agent/ask",
+        json={"question": "How is Tyrese Maxey trending?"},
+        headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert "rate limit" in second.json()["detail"]
+    assert fake_openai.responses.calls == 2
 
 
 def test_player_page_smoke() -> None:

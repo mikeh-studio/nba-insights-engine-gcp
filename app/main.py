@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -64,6 +67,10 @@ templates.env.filters["time_ago"] = _time_ago
 app = FastAPI(title="NBA 2025-26 Public API", version="1.0.0")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
+_AGENT_RATE_LIMIT_WINDOW_SECONDS = 60.0
+_agent_rate_limit_lock = Lock()
+_agent_rate_limit_hits: dict[str, deque[float]] = {}
+
 
 def get_repository(
     settings: Annotated[Settings, Depends(get_settings)],
@@ -73,6 +80,35 @@ def get_repository(
 
 def get_agent_client() -> Any | None:
     return None
+
+
+def _agent_rate_limit_key(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    if request.client is not None:
+        return request.client.host
+    return "unknown"
+
+
+def _check_agent_rate_limit(request: Request, settings: Settings) -> None:
+    limit = settings.agent_rate_limit_per_minute
+    if limit <= 0 or not settings.openai_agent_enabled:
+        return
+
+    key = _agent_rate_limit_key(request)
+    now = monotonic()
+    cutoff = now - _AGENT_RATE_LIMIT_WINDOW_SECONDS
+    with _agent_rate_limit_lock:
+        hits = _agent_rate_limit_hits.setdefault(key, deque())
+        while hits and hits[0] <= cutoff:
+            hits.popleft()
+        if len(hits) >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Ask NBA Stats rate limit exceeded. Try again in a minute.",
+            )
+        hits.append(now)
 
 
 @app.get("/api/leaderboard")
@@ -241,6 +277,7 @@ def api_player_game_log(
 
 @app.post("/api/agent/ask")
 def api_agent_ask(
+    request: Request,
     payload: AgentAskRequest,
     repo: Annotated[WarehouseRepository, Depends(get_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
@@ -249,6 +286,7 @@ def api_agent_ask(
     question = payload.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="Question must not be blank")
+    _check_agent_rate_limit(request, settings)
     agent = StatsAgent(settings, repo, client=agent_client)
     try:
         answer = agent.answer(question, conversation_id=payload.conversation_id)

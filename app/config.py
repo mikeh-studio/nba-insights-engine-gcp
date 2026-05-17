@@ -25,6 +25,7 @@ class Settings:
     openai_agent_model: str = "gpt-5.4-mini"
     openai_agent_enabled: bool = True
     agent_max_tool_calls: int = 6
+    agent_rate_limit_per_minute: int = 12
 
 
 def get_settings() -> Settings:
@@ -39,4 +40,5 @@ def get_settings() -> Settings:
         openai_agent_model=os.getenv("OPENAI_AGENT_MODEL", "gpt-5.4-mini"),
         openai_agent_enabled=_env_bool("OPENAI_AGENT_ENABLED", True),
         agent_max_tool_calls=int(os.getenv("AGENT_MAX_TOOL_CALLS", "6")),
+        agent_rate_limit_per_minute=int(os.getenv("AGENT_RATE_LIMIT_PER_MINUTE", "12")),
     )
