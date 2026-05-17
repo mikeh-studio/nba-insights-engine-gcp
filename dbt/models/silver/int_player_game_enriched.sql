@@ -24,6 +24,7 @@ select
     blk,
     tov,
     season,
+    season_type,
     player_id,
     player_name,
     upper({{ regex_extract('matchup', "'^([A-Z]{2,3})'") }}) as team_abbr,

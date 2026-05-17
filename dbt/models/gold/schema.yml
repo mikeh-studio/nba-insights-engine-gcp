@@ -63,6 +63,12 @@ models:
           - accepted_values:
               arguments:
                 values: ['2025-26']
+      - name: season_type
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['Regular Season', 'Playoffs']
       - name: game_date
         tests: [not_null]
       - name: matchup

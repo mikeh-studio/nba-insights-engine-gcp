@@ -186,6 +186,16 @@ def test_filter_incremental_game_logs_rejects_rows_outside_2025_26_window():
     assert result.iloc[0]["PLAYER_ID"] == 2
 
 
+def test_normalize_game_log_season_types_defaults_to_regular_and_playoffs():
+    assert pipeline.normalize_game_log_season_types() == [
+        "Regular Season",
+        "Playoffs",
+    ]
+    assert pipeline.normalize_game_log_season_types(
+        "Regular Season, Playoffs,Regular Season"
+    ) == ["Regular Season", "Playoffs"]
+
+
 def test_build_run_metadata_record_serializes_dates():
     record = pipeline.build_run_metadata_record(
         dag_run_id="manual__2025-02-10T00:00:00+00:00",
@@ -411,6 +421,7 @@ def test_validate_merge_reconciliation_rejects_post_count_mismatch():
 def test_game_logs_schema_includes_game_id():
     schema_names = [field.name for field in pipeline.get_game_logs_schema()]
     assert schema_names[0] == "GAME_ID"
+    assert "SEASON_TYPE" in schema_names
 
 
 def test_quote_bigquery_table_id_rejects_unsafe_identifier():
@@ -695,6 +706,35 @@ def test_fetch_official_injury_report_pdf_soft_fails_after_retries(monkeypatch):
     assert sleeps == [0]
 
 
+def test_fetch_official_injury_report_pdf_treats_403_as_missing(monkeypatch):
+    calls = []
+    sleeps = []
+
+    class ForbiddenResponse:
+        status_code = 403
+
+        def raise_for_status(self):
+            raise AssertionError("403 should be handled before raise_for_status")
+
+    class ForbiddenClient:
+        def get(self, url, timeout, headers):
+            calls.append((url, timeout))
+            return ForbiddenResponse()
+
+    monkeypatch.setattr(pipeline.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = pipeline.fetch_official_injury_report_pdf(
+        "https://example.test/missing-report.pdf",
+        timeout=2,
+        retries=3,
+        client=ForbiddenClient(),
+    )
+
+    assert result is None
+    assert calls == [("https://example.test/missing-report.pdf", 2)]
+    assert sleeps == []
+
+
 def test_ensure_table_has_columns_adds_expected_columns():
     class DummyJob:
         def result(self):
@@ -796,9 +836,10 @@ def test_get_player_game_log_passes_timeout_to_nba_api(monkeypatch):
     captured = {}
 
     class FakePlayerGameLog:
-        def __init__(self, *, player_id, season, timeout):
+        def __init__(self, *, player_id, season, season_type_all_star, timeout):
             captured["player_id"] = player_id
             captured["season"] = season
+            captured["season_type_all_star"] = season_type_all_star
             captured["timeout"] = timeout
 
         def get_data_frames(self):
@@ -808,9 +849,241 @@ def test_get_player_game_log_passes_timeout_to_nba_api(monkeypatch):
 
     result = pipeline.get_player_game_log(7, timeout=4.5, retries=1)
 
-    assert captured == {"player_id": 7, "season": "2025-26", "timeout": 4.5}
+    assert captured == {
+        "player_id": 7,
+        "season": "2025-26",
+        "season_type_all_star": "Regular Season",
+        "timeout": 4.5,
+    }
     assert len(result) == 1
     assert result.iloc[0]["GAME_ID"] == "0022500001"
+    assert result.iloc[0]["SEASON_TYPE"] == "Regular Season"
+
+
+def test_get_all_player_game_logs_fetches_configured_season_types(monkeypatch):
+    calls = []
+
+    def fake_get_player_game_log(player_id, *, season, season_type, **_kwargs):
+        calls.append((player_id, season, season_type))
+        frame = _player_game_log_api_frame().rename(columns={"Game_ID": "GAME_ID"})
+        frame["GAME_ID"] = "0042500001" if season_type == "Playoffs" else "0022500001"
+        frame["SEASON_TYPE"] = season_type
+        if season_type == "Playoffs":
+            frame["GAME_DATE"] = "2026-04-18"
+        frame["SEASON"] = season
+        frame["INGESTED_AT_UTC"] = pd.Timestamp("2026-02-11T00:00:00Z")
+        return frame
+
+    monkeypatch.setattr(pipeline, "get_player_game_log", fake_get_player_game_log)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    result = pipeline.get_all_player_game_logs(
+        [{"id": 7, "full_name": "Test Player"}],
+        season_types=["Regular Season", "Playoffs"],
+        extract_mode="players",
+        delay=0,
+    )
+
+    assert calls == [
+        (7, "2025-26", "Regular Season"),
+        (7, "2025-26", "Playoffs"),
+    ]
+    assert result["GAME_ID"].tolist() == ["0042500001", "0022500001"]
+    assert result["SEASON_TYPE"].tolist() == ["Playoffs", "Regular Season"]
+
+
+def test_get_all_player_game_logs_uses_league_endpoint_by_default(monkeypatch):
+    calls = []
+
+    def fake_get_league_player_game_log(*, season, season_type, **_kwargs):
+        calls.append((season, season_type))
+        frame = _player_game_log_api_frame().rename(columns={"Game_ID": "GAME_ID"})
+        frame["GAME_ID"] = "0042500001" if season_type == "Playoffs" else "0022500001"
+        frame["SEASON_TYPE"] = season_type
+        if season_type == "Playoffs":
+            frame["GAME_DATE"] = "2026-04-18"
+        frame["SEASON"] = season
+        frame["INGESTED_AT_UTC"] = pd.Timestamp("2026-02-11T00:00:00Z")
+        frame["PLAYER_ID"] = 7
+        frame["PLAYER_NAME"] = "Test Player"
+        return frame[[field.name for field in pipeline.get_game_logs_schema()]]
+
+    monkeypatch.setattr(
+        pipeline,
+        "get_league_player_game_log",
+        fake_get_league_player_game_log,
+    )
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    result = pipeline.get_all_player_game_logs(
+        [{"id": 7, "full_name": "Ignored In League Mode"}],
+        season_types="Regular Season,Playoffs",
+        delay=0,
+    )
+
+    assert calls == [
+        ("2025-26", "Regular Season"),
+        ("2025-26", "Playoffs"),
+    ]
+    assert result["GAME_ID"].tolist() == ["0042500001", "0022500001"]
+    assert result["SEASON_TYPE"].tolist() == ["Playoffs", "Regular Season"]
+
+
+def test_get_all_player_game_logs_falls_back_to_cdn_for_missing_league_rows(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_get_league_player_game_log(*, season, season_type, **_kwargs):
+        calls.append((season, season_type))
+        return pd.DataFrame(columns=[field.name for field in pipeline.get_game_logs_schema()])
+
+    fallback_frame = _player_game_log_api_frame().rename(columns={"Game_ID": "GAME_ID"})
+    fallback_frame["GAME_ID"] = "0042500101"
+    fallback_frame["GAME_DATE"] = "2026-04-19"
+    fallback_frame["SEASON_TYPE"] = "Playoffs"
+    fallback_frame["SEASON"] = "2025-26"
+    fallback_frame["INGESTED_AT_UTC"] = pd.Timestamp("2026-05-13T00:00:00Z")
+    fallback_frame["PLAYER_ID"] = 7
+    fallback_frame["PLAYER_NAME"] = "Test Player"
+
+    def fake_get_cdn_player_game_logs(**kwargs):
+        assert kwargs["season_types"] == ["Regular Season", "Playoffs"]
+        assert kwargs["start_date"] == "2026-04-18"
+        return fallback_frame[[field.name for field in pipeline.get_game_logs_schema()]]
+
+    monkeypatch.setattr(
+        pipeline,
+        "get_league_player_game_log",
+        fake_get_league_player_game_log,
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "get_cdn_player_game_logs",
+        fake_get_cdn_player_game_logs,
+    )
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    result = pipeline.get_all_player_game_logs(
+        [{"id": 7, "full_name": "Ignored In League Mode"}],
+        season_types=["Regular Season", "Playoffs"],
+        start_date="2026-04-18",
+        allow_cdn_fallback=True,
+        delay=0,
+    )
+
+    assert calls == [
+        ("2025-26", "Regular Season"),
+        ("2025-26", "Playoffs"),
+    ]
+    assert result["GAME_ID"].tolist() == ["0042500101"]
+    assert result["SEASON_TYPE"].tolist() == ["Playoffs"]
+
+
+def test_get_cdn_player_game_logs_parses_live_boxscore(monkeypatch):
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    player_stats = {
+        "assists": 4,
+        "blocks": 1,
+        "fieldGoalsAttempted": 10,
+        "fieldGoalsMade": 5,
+        "fieldGoalsPercentage": 0.5,
+        "foulsPersonal": 2,
+        "freeThrowsAttempted": 4,
+        "freeThrowsMade": 3,
+        "freeThrowsPercentage": 0.75,
+        "minutes": "PT25M30.00S",
+        "plusMinusPoints": 7.0,
+        "points": 16,
+        "reboundsDefensive": 5,
+        "reboundsOffensive": 1,
+        "reboundsTotal": 6,
+        "steals": 2,
+        "threePointersAttempted": 6,
+        "threePointersMade": 3,
+        "threePointersPercentage": 0.5,
+        "turnovers": 1,
+    }
+    schedule_payload = {
+        "leagueSchedule": {
+            "gameDates": [
+                {
+                    "games": [
+                        {
+                            "gameId": "0042500101",
+                            "gameStatus": 3,
+                            "gameDateEst": "2026-04-19T00:00:00Z",
+                        },
+                        {
+                            "gameId": "0012500001",
+                            "gameStatus": 3,
+                            "gameDateEst": "2026-04-19T00:00:00Z",
+                        },
+                    ]
+                }
+            ]
+        }
+    }
+    boxscore_payload = {
+        "game": {
+            "gameId": "0042500101",
+            "gameTimeLocal": "2026-04-19T18:30:00-04:00",
+            "homeTeam": {
+                "teamTricode": "DET",
+                "score": 101,
+                "players": [
+                    {
+                        "played": "1",
+                        "personId": 1630595,
+                        "name": "Cade Cunningham",
+                        "statistics": player_stats,
+                    }
+                ],
+            },
+            "awayTeam": {
+                "teamTricode": "ORL",
+                "score": 112,
+                "players": [],
+            },
+        }
+    }
+
+    def fake_get(url, **_kwargs):
+        if "scheduleLeague" in url:
+            return FakeResponse(schedule_payload)
+        if "boxscore_0042500101" in url:
+            return FakeResponse(boxscore_payload)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    monkeypatch.setattr(pipeline.requests, "get", fake_get)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    result = pipeline.get_cdn_player_game_logs(
+        season_types=["Playoffs"],
+        start_date="2026-04-18",
+        end_date="2026-04-20",
+        delay=0,
+    )
+
+    assert len(result) == 1
+    row = result.iloc[0]
+    assert row["GAME_ID"] == "0042500101"
+    assert row["GAME_DATE"].isoformat() == "2026-04-19"
+    assert row["MATCHUP"] == "DET vs. ORL"
+    assert row["WL"] == "L"
+    assert row["MIN"] == 25.5
+    assert row["FG3M"] == 3.0
+    assert row["PTS"] == 16
+    assert row["PLAYER_NAME"] == "Cade Cunningham"
 
 
 def _line_score_api_frame():
@@ -1182,6 +1455,32 @@ def test_get_all_player_references_dedupes_by_player_id(monkeypatch):
 
     assert len(result) == 1
     assert result.iloc[0]["PLAYER_ID"] == 7
+
+
+def test_get_all_player_references_stops_after_empty_profile_limit(monkeypatch):
+    calls = []
+
+    def fake_get_player_reference(player_id: int, **_kwargs):
+        calls.append(player_id)
+        return pd.DataFrame(columns=[field.name for field in pipeline.get_player_reference_schema()])
+
+    monkeypatch.setattr(pipeline, "get_player_reference", fake_get_player_reference)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda _seconds: None)
+
+    players = [
+        {"id": 1, "full_name": "Player One"},
+        {"id": 2, "full_name": "Player Two"},
+        {"id": 3, "full_name": "Player Three"},
+        {"id": 4, "full_name": "Player Four"},
+    ]
+    result = pipeline.get_all_player_references(
+        players,
+        delay=0,
+        max_empty_profiles=3,
+    )
+
+    assert result.empty
+    assert calls == [1, 2, 3]
 
 
 def _bootstrap_game_logs_sample():

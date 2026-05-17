@@ -145,6 +145,7 @@ _RAW_TABLE_SPECS = {
             ("pf", "BIGINT"),
             ("plus_minus", "DOUBLE PRECISION"),
             ("season", "VARCHAR(10)"),
+            ("season_type", "VARCHAR(20)"),
             ("ingested_at_utc", "TIMESTAMP"),
             ("player_id", "BIGINT"),
             ("player_name", "VARCHAR(200)"),

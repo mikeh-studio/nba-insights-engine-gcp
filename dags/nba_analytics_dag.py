@@ -284,6 +284,10 @@ def nba_analytics_pipeline():
         season = SUPPORTED_SEASON
         replay_days = int(get_config("NBA_REPLAY_DAYS", "3"))
         max_players = int(get_config("NBA_MAX_PLAYERS", "0"))
+        season_types = pipeline.normalize_game_log_season_types(
+            get_config("NBA_GAME_LOG_SEASON_TYPES", "Regular Season,Playoffs")
+        )
+        game_log_extract_mode = get_config("NBA_GAME_LOG_EXTRACT_MODE", "league")
         project_id = get_project_id()
         bucket_name = get_config("GCS_BUCKET_NAME")
         location = get_config("BQ_LOCATION", "US")
@@ -298,6 +302,13 @@ def nba_analytics_pipeline():
         run_table = f"{project_id}.{metadata_dataset}.pipeline_run_log"
         pipeline.create_metadata_tables(client, state_table, run_table)
         state = pipeline.get_ingestion_state(client, state_table, season=season)
+        replay_start = pipeline.compute_replay_start(
+            state["watermark_date"], replay_days=replay_days
+        )
+        cdn_fallback_enabled = (
+            get_config("NBA_GAME_LOG_CDN_FALLBACK_ENABLED", "true").strip().lower()
+            in {"1", "true", "t", "yes", "y", "on"}
+        )
 
         active = pipeline.get_active_players()
         selected = active if max_players <= 0 else active[:max_players]
@@ -306,6 +317,10 @@ def nba_analytics_pipeline():
         df = pipeline.get_all_player_game_logs(
             selected,
             season=season,
+            season_types=season_types,
+            extract_mode=game_log_extract_mode,
+            start_date=replay_start,
+            allow_cdn_fallback=cdn_fallback_enabled,
             **get_nba_api_request_config(),
         )
         incremental_df = pipeline.filter_incremental_game_logs(
@@ -500,11 +515,13 @@ def nba_analytics_pipeline():
         location = get_config("BQ_LOCATION", "US")
         metadata_dataset = get_dataset("BQ_METADATA_DATASET", "nba_metadata")
         max_players = int(get_config("NBA_MAX_PLAYERS", "0"))
+        max_empty_profiles = get_int_config("NBA_PLAYER_REFERENCE_MAX_EMPTY_PROFILES", "3")
 
         active = pipeline.get_active_players()
         selected = active if max_players <= 0 else active[:max_players]
         reference_df = pipeline.get_all_player_references(
             selected,
+            max_empty_profiles=max_empty_profiles,
             **get_nba_api_request_config(),
         )
         if reference_df.empty:
@@ -1580,6 +1597,9 @@ def nba_analytics_pipeline():
             "BQ_DATASET_SILVER", get_dataset("BQ_DATASET_SILVER", "nba_silver")
         )
         env.setdefault("BQ_DATASET_GOLD", get_dataset("BQ_DATASET_GOLD", "nba_gold"))
+        env.setdefault(
+            "BQ_DATASET_AGENT", get_dataset("BQ_DATASET_AGENT", "nba_agent")
+        )
         env.setdefault("NBA_SEASON", SUPPORTED_SEASON)
         merge_result["dbt_command"] = " ".join(command)
         completed = subprocess.run(

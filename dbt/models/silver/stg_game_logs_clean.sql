@@ -109,6 +109,24 @@ deduped as (
         cast(blk as {{ int64_type() }}) as blk,
         cast(tov as {{ int64_type() }}) as tov,
         cast(season as {{ varchar_type() }}) as season,
+        {% if 'season_type' in ns.column_names %}
+        coalesce(
+            nullif(trim(cast(season_type as {{ varchar_type() }})), ''),
+            case
+                when substring(cast(game_id as {{ varchar_type() }}), 1, 3) = '004' then 'Playoffs'
+                when substring(cast(game_id as {{ varchar_type() }}), 1, 3) = '002' then 'Regular Season'
+                else 'Regular Season'
+            end
+        ) as season_type,
+        {% elif 'game_id' in ns.column_names %}
+        case
+            when substring(cast(game_id as {{ varchar_type() }}), 1, 3) = '004' then 'Playoffs'
+            when substring(cast(game_id as {{ varchar_type() }}), 1, 3) = '002' then 'Regular Season'
+            else 'Regular Season'
+        end as season_type,
+        {% else %}
+        'Regular Season' as season_type,
+        {% endif %}
         cast(player_id as {{ int64_type() }}) as player_id,
         cast(player_name as {{ varchar_type() }}) as player_name,
         cast(ingested_at_utc as timestamp) as ingested_at_utc,
@@ -139,6 +157,7 @@ select
     blk,
     tov,
     season,
+    season_type,
     player_id,
     player_name,
     ingested_at_utc

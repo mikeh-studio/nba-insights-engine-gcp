@@ -13,6 +13,7 @@ select
     game_date,
     matchup,
     season,
+    season_type,
     wl,
     min,
     cast(fgm as {{ int64_type() }}) as fgm,

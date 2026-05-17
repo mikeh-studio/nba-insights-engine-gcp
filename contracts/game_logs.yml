@@ -33,6 +33,7 @@ columns:
   PF: int64
   PLUS_MINUS: float64
   SEASON: string
+  SEASON_TYPE: string
   INGESTED_AT_UTC: timestamp
   PLAYER_ID: int64
   PLAYER_NAME: string
@@ -49,6 +50,11 @@ rules:
     check: equals
     column: SEASON
     value: "2025-26"
+    severity: fatal
+  - name: season_type_values
+    check: in_set
+    column: SEASON_TYPE
+    values: ["Regular Season", "Playoffs"]
     severity: fatal
   - name: game_date_supported_window
     check: date_between

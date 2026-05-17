@@ -39,6 +39,7 @@ def _game_log_row(**overrides):
         "PF": 3,
         "PLUS_MINUS": 8.0,
         "SEASON": "2025-26",
+        "SEASON_TYPE": "Regular Season",
         "INGESTED_AT_UTC": "2026-01-10T12:00:00Z",
         "PLAYER_ID": 2544,
         "PLAYER_NAME": "LeBron James",
@@ -212,6 +213,19 @@ def test_duplicate_business_key_is_fatal():
     assert exc.value.result["status"] == "fatal"
     assert any(
         violation["rule"] == "business_key_unique"
+        for violation in exc.value.result["violations"]
+    )
+
+
+def test_invalid_game_log_season_type_is_fatal():
+    frame = pd.DataFrame([_game_log_row(SEASON_TYPE="Pre Season")])
+
+    with pytest.raises(contracts.SourceContractError) as exc:
+        contracts.validate_source_contract("game_logs", frame)
+
+    assert exc.value.result["status"] == "fatal"
+    assert any(
+        violation["rule"] == "season_type_values"
         for violation in exc.value.result["violations"]
     )
 

@@ -18,10 +18,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import requests
 from google.api_core.exceptions import NotFound
 from google.cloud import bigquery, storage
 from nba_api.stats.endpoints import boxscoresummaryv2
 from nba_api.stats.endpoints import commonplayerinfo
+from nba_api.stats.endpoints import leaguegamelog
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.endpoints import scheduleleaguev2
 from nba_api.stats.static import players
@@ -41,9 +43,29 @@ OFFICIAL_INJURY_REPORT_HEADERS = {
     ),
     "Accept": "application/pdf,application/octet-stream,*/*",
 }
+NBA_CDN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Referer": "https://www.nba.com/",
+}
+NBA_CDN_SCHEDULE_URL = (
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+)
+NBA_CDN_BOXSCORE_URL_TEMPLATE = (
+    "https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json"
+)
 SUPPORTED_SEASON = "2025-26"
 SUPPORTED_SEASON_START = date(2025, 7, 1)
 SUPPORTED_SEASON_END = date(2026, 6, 30)
+DEFAULT_GAME_LOG_SEASON_TYPES = ("Regular Season", "Playoffs")
+NBA_CDN_GAME_ID_PREFIX_TO_SEASON_TYPE = {
+    "002": "Regular Season",
+    "004": "Playoffs",
+}
 NBA_API_TIMEOUT_SECONDS = 15.0
 NBA_API_RETRIES = 3
 NBA_API_RETRY_BASE_DELAY_SECONDS = 1.0
@@ -113,6 +135,31 @@ def get_season_date_bounds(season: str = SUPPORTED_SEASON) -> Tuple[date, date]:
     if season != SUPPORTED_SEASON:
         raise ValueError(f"Unsupported production season: {season}")
     return SUPPORTED_SEASON_START, SUPPORTED_SEASON_END
+
+
+def normalize_game_log_season_types(value: Any = None) -> List[str]:
+    """Return ordered NBA API season types for player game-log extraction."""
+    if value in (None, ""):
+        candidates = list(DEFAULT_GAME_LOG_SEASON_TYPES)
+    elif isinstance(value, str):
+        candidates = [part.strip() for part in value.split(",")]
+    else:
+        candidates = [str(part).strip() for part in value]
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        normalized.append(candidate)
+        seen.add(key)
+
+    if not normalized:
+        raise ValueError("At least one NBA game-log season type must be configured")
+    return normalized
 
 
 def coerce_to_date(value: Any) -> Optional[date]:
@@ -587,9 +634,243 @@ def _sleep_before_nba_api_retry(
     time.sleep(sleep_seconds)
 
 
+def _cdn_season_type_from_game_id(game_id: Any) -> Optional[str]:
+    game_id_text = str(game_id or "").strip()
+    if len(game_id_text) < 3:
+        return None
+    return NBA_CDN_GAME_ID_PREFIX_TO_SEASON_TYPE.get(game_id_text[:3])
+
+
+def _parse_nba_duration_minutes(value: Any) -> float:
+    if value in (None, "", pd.NaT):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return round(float(value), 2)
+
+    text = str(value).strip()
+    match = re.fullmatch(
+        r"PT(?:(?P<hours>\d+(?:\.\d+)?)H)?(?:(?P<minutes>\d+(?:\.\d+)?)M)?(?:(?P<seconds>\d+(?:\.\d+)?)S)?",
+        text,
+    )
+    if match:
+        hours = float(match.group("hours") or 0)
+        minutes = float(match.group("minutes") or 0)
+        seconds = float(match.group("seconds") or 0)
+        return round(hours * 60 + minutes + seconds / 60, 2)
+
+    parsed = pd.to_timedelta(text, errors="coerce")
+    if pd.isna(parsed):
+        return 0.0
+    return round(parsed.total_seconds() / 60, 2)
+
+
+def _request_nba_cdn_json(url: str, *, timeout: float) -> dict[str, Any]:
+    response = requests.get(url, headers=NBA_CDN_HEADERS, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError(f"NBA CDN response was not an object: {url}")
+    return payload
+
+
+def _extract_cdn_schedule_games(
+    payload: dict[str, Any],
+    *,
+    season_types: Iterable[str],
+    start_date: Any = None,
+    end_date: Any = None,
+) -> list[dict[str, Any]]:
+    requested = set(normalize_game_log_season_types(season_types))
+    start = coerce_to_date(start_date)
+    end = coerce_to_date(end_date)
+    season_start, season_end = get_season_date_bounds(SUPPORTED_SEASON)
+    if start is None:
+        start = season_start
+    if end is None:
+        end = min(date.today(), season_end)
+
+    games: list[dict[str, Any]] = []
+    for date_group in (
+        payload.get("leagueSchedule", {}).get("gameDates", [])
+        if isinstance(payload.get("leagueSchedule"), dict)
+        else []
+    ):
+        for game in date_group.get("games", []) if isinstance(date_group, dict) else []:
+            game_id = str(game.get("gameId") or "").strip()
+            season_type = _cdn_season_type_from_game_id(game_id)
+            if season_type not in requested:
+                continue
+            if int(game.get("gameStatus") or 0) != 3:
+                continue
+            game_date = coerce_to_date(
+                game.get("gameDateEst")
+                or game.get("gameDateUTC")
+                or game.get("gameDate")
+            )
+            if game_date is None or game_date < start or game_date > end:
+                continue
+            games.append(
+                {
+                    "game_id": game_id,
+                    "season_type": season_type,
+                    "game_date": game_date,
+                }
+            )
+
+    games.sort(key=lambda item: (item["game_date"], item["game_id"]))
+    return games
+
+
+def _metric(stats: dict[str, Any], name: str, default: Any = 0) -> Any:
+    value = stats.get(name, default)
+    return default if value is None else value
+
+
+def _cdn_boxscore_player_rows(
+    payload: dict[str, Any],
+    *,
+    season: str,
+    season_type: str,
+    game_date: Any = None,
+    ingested_at_utc: pd.Timestamp | None = None,
+) -> list[dict[str, Any]]:
+    game = payload.get("game")
+    if not isinstance(game, dict):
+        return []
+    game_id = str(game.get("gameId") or "").strip()
+    parsed_game_date = coerce_to_date(
+        game_date or game.get("gameTimeLocal") or game.get("gameTimeUTC")
+    )
+    if not game_id or parsed_game_date is None:
+        return []
+
+    ingested = ingested_at_utc or pd.Timestamp.now(tz="UTC")
+    home_team = game.get("homeTeam") or {}
+    away_team = game.get("awayTeam") or {}
+    team_contexts = [
+        (home_team, away_team, "vs."),
+        (away_team, home_team, "@"),
+    ]
+    rows: list[dict[str, Any]] = []
+    for team, opponent, matchup_token in team_contexts:
+        if not isinstance(team, dict) or not isinstance(opponent, dict):
+            continue
+        team_abbr = str(team.get("teamTricode") or "").upper()
+        opponent_abbr = str(opponent.get("teamTricode") or "").upper()
+        if not team_abbr or not opponent_abbr:
+            continue
+        team_score = int(team.get("score") or 0)
+        opponent_score = int(opponent.get("score") or 0)
+        wl = "W" if team_score > opponent_score else "L"
+        matchup = f"{team_abbr} {matchup_token} {opponent_abbr}"
+
+        for player in team.get("players", []):
+            if not isinstance(player, dict) or str(player.get("played")) != "1":
+                continue
+            stats = player.get("statistics") or {}
+            if not isinstance(stats, dict):
+                continue
+            player_id = player.get("personId")
+            if player_id in (None, ""):
+                continue
+            rows.append(
+                {
+                    "GAME_ID": game_id,
+                    "GAME_DATE": parsed_game_date,
+                    "MATCHUP": matchup,
+                    "WL": wl,
+                    "MIN": _parse_nba_duration_minutes(stats.get("minutes")),
+                    "FGM": float(_metric(stats, "fieldGoalsMade")),
+                    "FGA": float(_metric(stats, "fieldGoalsAttempted")),
+                    "FG_PCT": float(_metric(stats, "fieldGoalsPercentage")),
+                    "FG3M": float(_metric(stats, "threePointersMade")),
+                    "FG3A": float(_metric(stats, "threePointersAttempted")),
+                    "FG3_PCT": float(_metric(stats, "threePointersPercentage")),
+                    "FTM": float(_metric(stats, "freeThrowsMade")),
+                    "FTA": float(_metric(stats, "freeThrowsAttempted")),
+                    "FT_PCT": float(_metric(stats, "freeThrowsPercentage")),
+                    "OREB": float(_metric(stats, "reboundsOffensive")),
+                    "DREB": float(_metric(stats, "reboundsDefensive")),
+                    "PTS": int(_metric(stats, "points")),
+                    "REB": int(_metric(stats, "reboundsTotal")),
+                    "AST": int(_metric(stats, "assists")),
+                    "STL": int(_metric(stats, "steals")),
+                    "BLK": int(_metric(stats, "blocks")),
+                    "TOV": int(_metric(stats, "turnovers")),
+                    "PF": int(_metric(stats, "foulsPersonal")),
+                    "PLUS_MINUS": float(_metric(stats, "plusMinusPoints")),
+                    "SEASON": season,
+                    "SEASON_TYPE": season_type,
+                    "INGESTED_AT_UTC": ingested,
+                    "PLAYER_ID": int(player_id),
+                    "PLAYER_NAME": str(player.get("name") or "").strip(),
+                }
+            )
+    return rows
+
+
+def get_cdn_player_game_logs(
+    *,
+    season: str = SUPPORTED_SEASON,
+    season_types: Iterable[str] | str | None = None,
+    start_date: Any = None,
+    end_date: Any = None,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    delay: float = 0.05,
+) -> pd.DataFrame:
+    """Fetch game logs from NBA CDN schedule and live boxscores.
+
+    This is a fallback path for periods when stats.nba.com league game logs time
+    out but the public CDN boxscore JSON remains available.
+    """
+    normalized_season_types = normalize_game_log_season_types(season_types)
+    schedule_payload = _request_nba_cdn_json(NBA_CDN_SCHEDULE_URL, timeout=timeout)
+    scheduled_games = _extract_cdn_schedule_games(
+        schedule_payload,
+        season_types=normalized_season_types,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if not scheduled_games:
+        return pd.DataFrame(columns=[field.name for field in get_game_logs_schema()])
+
+    ingested_at = pd.Timestamp.now(tz="UTC")
+    rows: list[dict[str, Any]] = []
+    for game in scheduled_games:
+        game_id = game["game_id"]
+        try:
+            payload = _request_nba_cdn_json(
+                NBA_CDN_BOXSCORE_URL_TEMPLATE.format(game_id=game_id),
+                timeout=timeout,
+            )
+        except Exception:
+            logger.exception("Failed NBA CDN boxscore game_id=%s", game_id)
+            continue
+        rows.extend(
+            _cdn_boxscore_player_rows(
+                payload,
+                season=season,
+                season_type=game["season_type"],
+                game_date=game["game_date"],
+                ingested_at_utc=ingested_at,
+            )
+        )
+        if delay > 0:
+            time.sleep(delay)
+
+    if not rows:
+        return pd.DataFrame(columns=[field.name for field in get_game_logs_schema()])
+
+    out = pd.DataFrame(rows)
+    out = out.drop_duplicates(subset=["PLAYER_ID", "GAME_DATE", "MATCHUP"]).copy()
+    out = out.sort_values(["GAME_DATE", "PLAYER_ID"], ascending=[False, True])
+    return out[[field.name for field in get_game_logs_schema()]]
+
+
 def get_player_game_log(
     player_id: int,
     season: str = SUPPORTED_SEASON,
+    season_type: str = DEFAULT_GAME_LOG_SEASON_TYPES[0],
     retries: int = NBA_API_RETRIES,
     delay: Optional[float] = None,
     timeout: float = NBA_API_TIMEOUT_SECONDS,
@@ -633,6 +914,7 @@ def get_player_game_log(
             gamelog = playergamelog.PlayerGameLog(
                 player_id=player_id,
                 season=season,
+                season_type_all_star=season_type,
                 timeout=timeout,
             )
             df = gamelog.get_data_frames()[0]
@@ -672,13 +954,15 @@ def get_player_game_log(
                 out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
 
             out["SEASON"] = season
+            out["SEASON_TYPE"] = season_type
             out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
             return out
         except Exception:
             if attempt == retries:
                 logger.exception(
-                    "Failed NBA API player game log player_id=%s after %s attempts timeout=%.1fs",
+                    "Failed NBA API player game log player_id=%s season_type=%s after %s attempts timeout=%.1fs",
                     player_id,
+                    season_type,
                     retries,
                     timeout,
                 )
@@ -697,10 +981,162 @@ def get_player_game_log(
     return pd.DataFrame()
 
 
+def _normalize_game_log_response_frame(
+    df: pd.DataFrame,
+    *,
+    season: str,
+    season_type: str = "",
+) -> pd.DataFrame:
+    """Normalize an NBA API player game-log response to the bronze contract."""
+    cols = [
+        "GAME_ID",
+        "GAME_DATE",
+        "MATCHUP",
+        "WL",
+        "MIN",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG3M",
+        "FG3A",
+        "FG3_PCT",
+        "FTM",
+        "FTA",
+        "FT_PCT",
+        "OREB",
+        "DREB",
+        "PTS",
+        "REB",
+        "AST",
+        "STL",
+        "BLK",
+        "TOV",
+        "PF",
+        "PLUS_MINUS",
+    ]
+    if "GAME_ID" not in df.columns and "Game_ID" in df.columns:
+        df = df.rename(columns={"Game_ID": "GAME_ID"})
+
+    missing_cols = [column for column in cols if column not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing expected columns: {missing_cols}")
+
+    out = df[cols].copy()
+    out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], errors="coerce")
+    out = out.dropna(subset=["GAME_DATE"])
+
+    numeric_cols = [
+        "MIN",
+        "FGM",
+        "FGA",
+        "FG_PCT",
+        "FG3M",
+        "FG3A",
+        "FG3_PCT",
+        "FTM",
+        "FTA",
+        "FT_PCT",
+        "OREB",
+        "DREB",
+        "PTS",
+        "REB",
+        "AST",
+        "STL",
+        "BLK",
+        "TOV",
+        "PF",
+        "PLUS_MINUS",
+    ]
+    for col in numeric_cols:
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+
+    out["SEASON"] = season
+    out["SEASON_TYPE"] = season_type
+    out["INGESTED_AT_UTC"] = pd.Timestamp.now(tz="UTC")
+    return out
+
+
+def get_league_player_game_log(
+    *,
+    season: str = SUPPORTED_SEASON,
+    season_type: str = DEFAULT_GAME_LOG_SEASON_TYPES[0],
+    retries: int = NBA_API_RETRIES,
+    delay: Optional[float] = None,
+    timeout: float = NBA_API_TIMEOUT_SECONDS,
+    retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
+    retry_backoff_multiplier: float = NBA_API_RETRY_BACKOFF_MULTIPLIER,
+    retry_max_delay: float = NBA_API_RETRY_MAX_DELAY_SECONDS,
+) -> pd.DataFrame:
+    """Get all player game logs for one season type through the league endpoint."""
+    retries = normalize_nba_api_retries(retries)
+    if delay is not None:
+        retry_base_delay = delay
+
+    for attempt in range(1, retries + 1):
+        try:
+            gamelog = leaguegamelog.LeagueGameLog(
+                player_or_team_abbreviation="P",
+                season=season,
+                season_type_all_star=season_type,
+                timeout=timeout,
+            )
+            df = gamelog.get_data_frames()[0]
+            if df.empty:
+                return pd.DataFrame(columns=[field.name for field in get_game_logs_schema()])
+
+            player_cols = ["PLAYER_ID", "PLAYER_NAME"]
+            missing_player_cols = [
+                column for column in player_cols if column not in df.columns
+            ]
+            if missing_player_cols:
+                raise ValueError(
+                    f"Missing expected player columns: {missing_player_cols}"
+                )
+
+            out = _normalize_game_log_response_frame(
+                df,
+                season=season,
+                season_type=season_type,
+            )
+            out["PLAYER_ID"] = pd.to_numeric(
+                df["PLAYER_ID"], errors="coerce"
+            ).astype("Int64")
+            out["PLAYER_NAME"] = df["PLAYER_NAME"].fillna("").astype("string")
+            out = out.dropna(subset=["PLAYER_ID"]).copy()
+            out["PLAYER_ID"] = out["PLAYER_ID"].astype(int)
+            return out[[field.name for field in get_game_logs_schema()]]
+        except Exception:
+            if attempt == retries:
+                logger.exception(
+                    "Failed NBA API league game log season_type=%s after %s attempts timeout=%.1fs",
+                    season_type,
+                    retries,
+                    timeout,
+                )
+                return pd.DataFrame(columns=[field.name for field in get_game_logs_schema()])
+            _sleep_before_nba_api_retry(
+                domain="league_game_log",
+                identifier=season_type,
+                attempt=attempt,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
+            )
+
+    return pd.DataFrame(columns=[field.name for field in get_game_logs_schema()])
+
+
 def get_all_player_game_logs(
     player_list: Iterable[dict],
     season: str = SUPPORTED_SEASON,
+    season_types: Iterable[str] | str | None = None,
+    extract_mode: str = "league",
     delay: float = 0.6,
+    start_date: Any = None,
+    end_date: Any = None,
+    allow_cdn_fallback: bool = False,
     retries: int = NBA_API_RETRIES,
     timeout: float = NBA_API_TIMEOUT_SECONDS,
     retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
@@ -710,27 +1146,79 @@ def get_all_player_game_logs(
     """Fetch game logs for multiple players with rate limiting."""
     all_logs = []
     player_list = list(player_list)
+    normalized_season_types = normalize_game_log_season_types(season_types)
+    normalized_extract_mode = str(extract_mode or "league").strip().lower()
+    fetched_season_types: set[str] = set()
 
-    for i, player in enumerate(player_list, start=1):
-        player_id = player["id"]
-        player_name = player["full_name"]
-        logger.info("Fetching %s/%s: %s", i, len(player_list), player_name)
+    if normalized_extract_mode == "league":
+        for season_type in normalized_season_types:
+            logger.info("Fetching league game logs: %s (%s)", season, season_type)
+            games = get_league_player_game_log(
+                season=season,
+                season_type=season_type,
+                retries=retries,
+                timeout=timeout,
+                retry_base_delay=retry_base_delay,
+                retry_backoff_multiplier=retry_backoff_multiplier,
+                retry_max_delay=retry_max_delay,
+            )
+            if not games.empty:
+                all_logs.append(games)
+                fetched_season_types.add(season_type)
+            time.sleep(delay)
+        missing_season_types = [
+            season_type
+            for season_type in normalized_season_types
+            if season_type not in fetched_season_types
+        ]
+        if allow_cdn_fallback and missing_season_types:
+            logger.warning(
+                "Falling back to NBA CDN boxscores for missing season types: %s",
+                ", ".join(missing_season_types),
+            )
+            fallback_games = get_cdn_player_game_logs(
+                season=season,
+                season_types=missing_season_types,
+                start_date=start_date,
+                end_date=end_date,
+                timeout=timeout,
+                delay=min(max(delay, 0.0), 0.1),
+            )
+            if not fallback_games.empty:
+                all_logs.append(fallback_games)
+    elif normalized_extract_mode == "players":
+        for i, player in enumerate(player_list, start=1):
+            player_id = player["id"]
+            player_name = player["full_name"]
+            for season_type in normalized_season_types:
+                logger.info(
+                    "Fetching %s/%s: %s (%s)",
+                    i,
+                    len(player_list),
+                    player_name,
+                    season_type,
+                )
 
-        games = get_player_game_log(
-            player_id,
-            season=season,
-            retries=retries,
-            timeout=timeout,
-            retry_base_delay=retry_base_delay,
-            retry_backoff_multiplier=retry_backoff_multiplier,
-            retry_max_delay=retry_max_delay,
+                games = get_player_game_log(
+                    player_id,
+                    season=season,
+                    season_type=season_type,
+                    retries=retries,
+                    timeout=timeout,
+                    retry_base_delay=retry_base_delay,
+                    retry_backoff_multiplier=retry_backoff_multiplier,
+                    retry_max_delay=retry_max_delay,
+                )
+                if not games.empty:
+                    games["PLAYER_ID"] = player_id
+                    games["PLAYER_NAME"] = player_name
+                    all_logs.append(games)
+
+                time.sleep(delay)
+    else:
+        raise ValueError(
+            "NBA game-log extract mode must be either 'league' or 'players'"
         )
-        if not games.empty:
-            games["PLAYER_ID"] = player_id
-            games["PLAYER_NAME"] = player_name
-            all_logs.append(games)
-
-        time.sleep(delay)
 
     if not all_logs:
         raise RuntimeError(
@@ -1048,6 +1536,7 @@ def get_all_player_references(
     player_list: Iterable[dict],
     *,
     delay: float = 0.4,
+    max_empty_profiles: int | None = None,
     retries: int = NBA_API_RETRIES,
     timeout: float = NBA_API_TIMEOUT_SECONDS,
     retry_base_delay: float = NBA_API_RETRY_BASE_DELAY_SECONDS,
@@ -1057,6 +1546,10 @@ def get_all_player_references(
     """Fetch player reference data for many players with rate limiting."""
     all_profiles = []
     player_list = list(player_list)
+    consecutive_empty_profiles = 0
+    empty_profile_limit = (
+        max(int(max_empty_profiles), 0) if max_empty_profiles is not None else None
+    )
 
     for idx, player in enumerate(player_list, start=1):
         player_id = player["id"]
@@ -1074,6 +1567,19 @@ def get_all_player_references(
         )
         if not profile.empty:
             all_profiles.append(profile)
+            consecutive_empty_profiles = 0
+        else:
+            consecutive_empty_profiles += 1
+            if (
+                empty_profile_limit is not None
+                and empty_profile_limit > 0
+                and consecutive_empty_profiles >= empty_profile_limit
+            ):
+                logger.warning(
+                    "Stopping player reference extraction after %s consecutive empty profiles",
+                    consecutive_empty_profiles,
+                )
+                break
         time.sleep(delay)
 
     if not all_profiles:
@@ -1143,6 +1649,7 @@ def get_game_logs_schema() -> List[bigquery.SchemaField]:
         bigquery.SchemaField("PF", "INTEGER"),
         bigquery.SchemaField("PLUS_MINUS", "FLOAT"),
         bigquery.SchemaField("SEASON", "STRING"),
+        bigquery.SchemaField("SEASON_TYPE", "STRING"),
         bigquery.SchemaField("INGESTED_AT_UTC", "TIMESTAMP"),
         bigquery.SchemaField("PLAYER_ID", "INTEGER"),
         bigquery.SchemaField("PLAYER_NAME", "STRING"),
@@ -1777,8 +2284,13 @@ def fetch_official_injury_report_pdf(
                     timeout=timeout,
                     headers=OFFICIAL_INJURY_REPORT_HEADERS,
                 )
-                if getattr(response, "status_code", None) == 404:
-                    logger.info("Official injury report not found: %s", source_url)
+                if getattr(response, "status_code", None) in {403, 404}:
+                    logger.info(
+                        "Official injury report not found or unavailable: "
+                        "url=%s status=%s",
+                        source_url,
+                        getattr(response, "status_code", None),
+                    )
                     return None
                 response.raise_for_status()
                 return response.content
@@ -2837,6 +3349,12 @@ def run_data_quality_checks(
       (SELECT COUNT(*) FROM base WHERE player_id IS NULL OR game_date IS NULL OR matchup IS NULL) AS null_key_rows,
       (SELECT duplicate_keys FROM dups) AS duplicate_key_rows,
       (SELECT COUNT(*) FROM base WHERE season != @season OR season IS NULL) AS invalid_season_rows,
+      (
+        SELECT COUNT(*)
+        FROM base
+        WHERE season_type IS NULL
+           OR season_type NOT IN ('Regular Season', 'Playoffs')
+      ) AS invalid_season_type_rows,
       (SELECT COUNT(*) FROM base WHERE game_date < @season_start OR game_date > @season_end) AS out_of_window_rows,
       (SELECT COUNT(*) FROM base WHERE wl IS NOT NULL AND upper(wl) NOT IN ('W', 'L')) AS invalid_wl_rows,
       (
@@ -2878,6 +3396,10 @@ def run_data_quality_checks(
     if dq["invalid_season_rows"] > 0:
         raise ValueError(
             f"DQ failed: found {dq['invalid_season_rows']} rows outside season {season}"
+        )
+    if dq["invalid_season_type_rows"] > 0:
+        raise ValueError(
+            f"DQ failed: found {dq['invalid_season_type_rows']} rows with invalid season_type values"
         )
     if dq["out_of_window_rows"] > 0:
         raise ValueError(
@@ -3077,6 +3599,7 @@ def create_and_merge_raw_table(
       pf INT64,
       plus_minus FLOAT64,
       season STRING,
+      season_type STRING,
       ingested_at_utc TIMESTAMP,
       player_id INT64,
       player_name STRING
@@ -3115,6 +3638,7 @@ def create_and_merge_raw_table(
           OR COALESCE(t.pf, 0) != COALESCE(s.pf, 0)
           OR COALESCE(t.plus_minus, 0) != COALESCE(s.plus_minus, 0)
           OR COALESCE(t.season, '') != COALESCE(s.season, '')
+          OR COALESCE(t.season_type, '') != COALESCE(s.season_type, '')
           OR COALESCE(t.player_name, '') != COALESCE(s.player_name, '')
         )
       ) AS updated
@@ -3156,6 +3680,7 @@ def create_and_merge_raw_table(
       OR COALESCE(T.pf, 0) != COALESCE(S.pf, 0)
       OR COALESCE(T.plus_minus, 0) != COALESCE(S.plus_minus, 0)
       OR COALESCE(T.season, '') != COALESCE(S.season, '')
+      OR COALESCE(T.season_type, '') != COALESCE(S.season_type, '')
       OR COALESCE(T.player_name, '') != COALESCE(S.player_name, '')
     ) THEN
       UPDATE SET
@@ -3182,16 +3707,17 @@ def create_and_merge_raw_table(
         pf = S.pf,
         plus_minus = S.plus_minus,
         season = S.season,
+        season_type = S.season_type,
         ingested_at_utc = S.ingested_at_utc,
         player_name = S.player_name
     WHEN NOT MATCHED THEN
       INSERT (game_id, game_date, matchup, wl, min, fgm, fga, fg_pct, fg3m, fg3a, fg3_pct,
               ftm, fta, ft_pct, oreb, dreb, pts, reb, ast, stl, blk, tov, pf, plus_minus,
-              season, ingested_at_utc, player_id, player_name)
+              season, season_type, ingested_at_utc, player_id, player_name)
       VALUES (S.game_id, S.game_date, S.matchup, S.wl, S.min, S.fgm, S.fga, S.fg_pct, S.fg3m, S.fg3a,
               S.fg3_pct, S.ftm, S.fta, S.ft_pct, S.oreb, S.dreb, S.pts, S.reb, S.ast, S.stl,
-              S.blk, S.tov, S.pf, S.plus_minus, S.season, S.ingested_at_utc, S.player_id,
-              S.player_name)
+              S.blk, S.tov, S.pf, S.plus_minus, S.season, S.season_type, S.ingested_at_utc,
+              S.player_id, S.player_name)
     """
 
     bq_client.query(create_ddl).result()

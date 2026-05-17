@@ -361,6 +361,7 @@ def _first_dq_issue(tasks: Iterable[TaskHealth]) -> tuple[str, dict[str, Any], T
             "null_key_rows",
             "duplicate_key_rows",
             "invalid_season_rows",
+            "invalid_season_type_rows",
             "out_of_window_rows",
             "invalid_wl_rows",
             "invalid_pct_rows",
